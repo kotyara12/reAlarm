@@ -266,9 +266,18 @@ void alarmProcessIncomingData(reciever_data_t data)
 // -------------------------------------------------- Task function ------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+void alarmIncomingDataTimer(void* arg)
+{
+
+}
+
 void alarmTaskExec(void *pvParameters)
 {
   reciever_data_t data;
+  esp_timer_create_args_t timer_args;
+  memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
+  timer_args.callback = &alarmIncomingDataTimer;
+  timer_args.name = "alarm_incoming_timer";
 
   while (1) {
     if (xQueueReceive(_alarmQueue, &data, portMAX_DELAY) == pdPASS) {
@@ -283,7 +292,7 @@ void alarmTaskExec(void *pvParameters)
       };
 
       // Log
-      rlog_i(logTAG, "Incoming message:: source: %d, protocol: %d, length: %d, value: 0x%.8X / %d, address: %.8X, command: %X", 
+      rlog_w(logTAG, "Incoming message:: source: %d, protocol: %d, length: %d, value: 0x%.8X / %d, address: %.8X, command: %X", 
         data.source, data.address, data.length, data.value, data.value, data.value >> 4, data.value & 0x0f);
 
       // Process message
