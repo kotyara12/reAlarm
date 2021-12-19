@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 #include <time.h>
 #include "esp_err.h"
 #include <driver/gpio.h>
