@@ -47,9 +47,9 @@ static const uint16_t ASR_RELAY_SWITCH = BIT11;  // Переключить ре�
 static const uint16_t ASRS_NONE        = 0x0000; // Никаой реакции (по умолчанию)
 static const uint16_t ASRS_CONTROL     = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
 static const uint16_t ASRS_REGISTER    = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
-static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM;
-static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_FLASHER;
-static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_SIREN | ASR_FLASHER;
+static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER;
+static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
+static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER | ASR_SIREN | ASR_FLASHER;
 
 /**
  * ТИП ДАТЧИКА
@@ -62,33 +62,6 @@ typedef enum {
   AST_RX433_20A4C,        // Беспроводной сенсор, общая длина кода 24 бит: 20 бит - адрес, последние 4 бита - команда
   AST_MQTT                // Виртуальный сенсор, получение данных с других устройств через локальный MQTT брокер
 } alarm_sensor_type_t;
-
-/**
- * ТИП СОБЫТИЯ
- * 
- * Тип события определяет текст уведомления, которое будет отправлено пользователю
- * */
-typedef enum {
-  ASE_EMPTY = 0,          // Не обрабатывается
-  ASE_TAMPER,             // Попытка взлома
-  ASE_POWER_ON,           // Питание восстановлено
-  ASE_POWER_OFF,          // Питание отсутствует
-  ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
-  ASE_DOOR,               // Дверь открыта
-  ASE_WINDOW,             // Окно открыто
-  ASE_MOTION,             // Обнаружено движение
-  ASE_SMOKE,              // Обнаружено задымление
-  ASE_FIRE,               // Обнаружено пламя
-  ASE_WATER_LEAK,         // Протечка воды
-  ASE_GAS_LEAK,           // Утечка газа
-  ASE_MONOXIDE,           // Угарный газ
-  ASE_SHOCK,              // Удар
-  ASE_BUTTON,             // Нажата кнопка
-  ASE_RCTRL_OFF,          // Пульт: режим охраны отключен
-  ASE_RCTRL_ON,           // Пульт: режим охраны включен
-  ASE_RCTRL_PERIMETER,    // Пульт: режим охраны периметра
-  ASE_RCTRL_OUTBUILDINGS  // Пульт: режим охраны внешних помещений
-} alarm_event_t;
 
 /**
  * РЕЖИМ РАБОТЫ
@@ -104,6 +77,25 @@ typedef enum {
 } alarm_mode_t;
 
 typedef void (*cb_alarm_change_mode_t) (alarm_mode_t mode);
+
+/**
+ * ТИП СОБЫТИЯ
+ * 
+ * Тип события определяет его обработку
+ * */
+typedef enum {
+  ASE_EMPTY = 0,          // Не обрабатывается
+  ASE_ALARM,              // Сигнал тревоги
+  ASE_TAMPER,             // Попытка вскрытия датчика
+  ASE_POWER_ON,           // Питание восстановлено
+  ASE_POWER_OFF,          // Питание отсутствует
+  ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
+  ASE_BUTTON,             // Нажата тревожная кнопка
+  ASE_RCTRL_OFF,          // Пульт: режим охраны отключен
+  ASE_RCTRL_ON,           // Пульт: режим охраны включен
+  ASE_RCTRL_PERIMETER,    // Пульт: режим охраны периметра
+  ASE_RCTRL_OUTBUILDINGS  // Пульт: режим охраны внешних помещений
+} alarm_event_t;
 
 /**
  * СИСТЕМНЫЕ СОБЫТИЯ 
@@ -152,8 +144,9 @@ static const uint32_t ALARM_VALUE_NONE = 0xFFFFFFFF;
 
 // Параметры события (сигнала с датчика)
 typedef struct alarmEvent_t {
-  alarm_event_t type;
   alarmZoneHandle_t zone;
+  alarm_event_t type;
+  const char* message;
   bool state;
   uint32_t value_set;
   uint32_t value_clr;
@@ -275,12 +268,13 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, u
  * @param zone Ссылка-указатель на зону
  * @param index Порядковый индекс команды от 0 до CONFIG_ALARM_MAX_EVENTS-1 в порядке приоритета
  * @param type Тип события
+ * @param message Сообщение для события
  * @param value_set Значение для установки статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
  * @param value_clear Значение для сброса статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
  * @param threshold Пороговое значение. Должно придти не менее заданного значения команд подряд в течение timeout. Имеет смысл для беспроводных датчиков, чтобы исключить ложные срабатывания
  * @param timeout Таймаут в миллисекундах. Используется для сброса статуса тревоги после получения последней команды value_set и при threshold больше 1
  * */
-void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, 
+void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, const char* message, 
   uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout);
 
 #ifdef __cplusplus
