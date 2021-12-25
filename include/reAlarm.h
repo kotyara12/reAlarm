@@ -1,5 +1,6 @@
 /* 
-   Модуль охранно-пожарной сигнализации с управлением через MQTT и Telegram
+   EN: Security and fire alarm module controlled via MQTT and Telegram
+   RU: Модуль охранно-пожарной сигнализации с управлением через MQTT и Telegram
    --------------------------
    (с) 2021 Разживин Александр | Razzhivin Alexander
    kotyara12@yandex.ru | https://kotyara12.ru | tg: @kotyara1971
@@ -9,6 +10,8 @@
 
 #ifndef __RE_ALARM_H__
 #define __RE_ALARM_H__
+
+#pragma GCC diagnostic ignored "-Wunused-variable"
 
 #include <stdbool.h>
 #include "reLed.h"
@@ -27,23 +30,26 @@
  * 
  * Реакция на события задается битовыми флагами для каждого режима работы
  * */
-static const uint16_t ASR_MQTT_LOCAL   = BIT0;  // Публикация события в локальном топике MQTT
-static const uint16_t ASR_MQTT_PUBLIC  = BIT1;  // Публикация события в публичном топике MQTT
-static const uint16_t ASR_EMAIL        = BIT2;  // Уведомление на электронную почту
-static const uint16_t ASR_TELEGRAM     = BIT3;  // Уведомление в Telegram
-static const uint16_t ASR_SIREN        = BIT4;  // Включить сирену
-static const uint16_t ASR_FLASHER      = BIT5;  // Включить маячок
-static const uint16_t ASR_RELAY_ON     = BIT6;  // Включить реле (нагрузку)
-static const uint16_t ASR_RELAY_OFF    = BIT7;  // Выключить реле (нагрузку)
-static const uint16_t ASR_RELAY_SWITCH = BIT8;  // Переключить реле (нагрузку)
-static const uint16_t ASR_RELAY_TIMER  = BIT9;  // Включить реле (нагрузку) на заданное время
+static const uint16_t ASR_COUNT_INC    = BIT0;  // Увеличить счетчик тревог
+static const uint16_t ASR_COUNT_DEC    = BIT1;  // Уменьшить счетчик тревог
+static const uint16_t ASR_MQTT_LOCAL   = BIT2;  // Публикация события в локальном топике MQTT
+static const uint16_t ASR_MQTT_PUBLIC  = BIT3;  // Публикация события в публичном топике MQTT
+static const uint16_t ASR_EMAIL        = BIT4;  // Уведомление на электронную почту
+static const uint16_t ASR_TELEGRAM     = BIT5;  // Уведомление в Telegram
+static const uint16_t ASR_SIREN        = BIT6;  // Включить сирену
+static const uint16_t ASR_FLASHER      = BIT7;  // Включить маячок
+static const uint16_t ASR_BUZZER       = BIT8;  // Звуковой сигнал на пульте
+static const uint16_t ASR_RELAY_ON     = BIT9;  // Включить реле (нагрузку)
+static const uint16_t ASR_RELAY_OFF    = BIT10;  // Выключить реле (нагрузку)
+static const uint16_t ASR_RELAY_SWITCH = BIT11;  // Переключить реле (нагрузку)
 
 // "Стандартные" наборы реакций
 static const uint16_t ASRS_NONE        = 0x0000; // Никаой реакции (по умолчанию)
+static const uint16_t ASRS_CONTROL     = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
 static const uint16_t ASRS_REGISTER    = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
-static const uint16_t ASRS_NOTIFY      = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM;
-static const uint16_t ASRS_SILENT      = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_FLASHER;
-static const uint16_t ASRS_ALARM       = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_SIREN | ASR_FLASHER;
+static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM;
+static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_FLASHER;
+static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_SIREN | ASR_FLASHER;
 
 /**
  * ТИП ДАТЧИКА
@@ -65,8 +71,8 @@ typedef enum {
 typedef enum {
   ASE_EMPTY = 0,          // Не обрабатывается
   ASE_TAMPER,             // Попытка взлома
-  ASE_POWER_OFF,          // Основное питание отсутствует
-  ASE_POWER_ON,           // Основное питание восстановлено
+  ASE_POWER_ON,           // Питание восстановлено
+  ASE_POWER_OFF,          // Питание отсутствует
   ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
   ASE_DOOR,               // Дверь открыта
   ASE_WINDOW,             // Окно открыто
@@ -78,35 +84,11 @@ typedef enum {
   ASE_MONOXIDE,           // Угарный газ
   ASE_SHOCK,              // Удар
   ASE_BUTTON,             // Нажата кнопка
-  ASE_RCONTROL_OFF,       // Пульт: режим охраны отключен
-  ASE_RCONTROL_ON,        // Пульт: режим охраны включен
-  ASE_RCONTROL_INHOME,    // Пульт: режим охраны периметра
-  ASE_RCONTROL_ALARM      // Пульт: тревога с пульта
+  ASE_RCTRL_OFF,          // Пульт: режим охраны отключен
+  ASE_RCTRL_ON,           // Пульт: режим охраны включен
+  ASE_RCTRL_PERIMETER,    // Пульт: режим охраны периметра
+  ASE_RCTRL_OUTBUILDINGS  // Пульт: режим охраны внешних помещений
 } alarm_event_t;
-
-/**
- * ТИП ЗОНЫ
- * 
- * Тип зоны определяет реакцию на событие в текущем режиме работы
- * Примечание: тип зоны "перекликаеся" с событиями, но это не одно и то же
- * */
-typedef enum {
-  ASZ_IGNORE = 0,         // Не обрабатывается
-  ASZ_PERIMETER,          // Периметр (внешние окна и двери)
-  ASZ_INDOOR,             // Внутри, в режиме охраны периметра игнорируются
-  ASZ_OUTDOOR,            // Снаружи, в любом режиме только уведомления (без сирены)
-  ASZ_OUTBUILDINGS,       // Хозяйственные постройки
-  ASZ_FIRE,               // Пожарные датчики
-  ASZ_WATER,              // Датчики протечки воды
-  ASZ_GAS,                // Датчики утечки газа
-  ASZ_CRASH,              // Сбои и поломки оборудования
-  ASZ_ALARM,              // Тревога с пульта
-  ASZ_EMERGENCY,          // Кнопки вызова экстренной помощи
-  ASZ_DOORBELL,           // Дверной звонок
-  ASZ_AUTOMATIC,          // Сенсор использутся для автоматики или управления освещением, но его данные регистрируются
-  ASZ_POWER,              // Контроль напряжения питания
-  ASZ_MAX                 // Не используется, это просто счетчик
-} alarm_zone_t;
 
 /**
  * РЕЖИМ РАБОТЫ
@@ -114,12 +96,38 @@ typedef enum {
  * Режим работы определяет реакцию на события в зависимости от типа зоны
  * */
 typedef enum {
-  ASM_ALARM_OFF = 0,      // Режим охраны отключен
-  ASM_ALARM_FULL,         // Режим охраны включен
-  ASM_ALARM_PERIMETER,    // Режим охраны периметра
-  ASM_ALARM_OUTBUILDINGS, // Режим охраны хозпостроек
-  ASM_ALARM_MAX           // Не используется, это просто счетчик
+  ASM_DISABLED = 0,      // Security mode disabled
+  ASM_ARMED,             // Security mode is on
+  ASM_PERIMETER,         // Perimeter security mode
+  ASM_OUTBUILDINGS,      // Outbuilding security regime
+  ASM_MAX                // Not used, it's just a counter
 } alarm_mode_t;
+
+typedef void (*cb_alarm_change_mode_t) (alarm_mode_t mode);
+
+/**
+ * СИСТЕМНЫЕ СОБЫТИЯ 
+ * 
+ * Отправка уведомлений в системный цикл событий
+ * */
+static const char* RE_ALARM_EVENTS = "REVT_ALARM";
+
+typedef enum {
+  RE_ALARM_MODE_DISABLED = 0,
+  RE_ALARM_MODE_ARMED,
+  RE_ALARM_MODE_PERIMETER,
+  RE_ALARM_MODE_OUTBUILDINGS,
+  RE_ALARM_SIGNAL_SET,
+  RE_ALARM_SIGNAL_CLEAR,
+  RE_ALARM_SIREN_ON,
+  RE_ALARM_SIREN_OFF,
+  RE_ALARM_FLASHER_ON,
+  RE_ALARM_FLASHER_OFF,
+  RE_ALARM_FLASHER_BLINK,
+  RE_ALARM_RELAY_ON,
+  RE_ALARM_RELAY_OFF,
+  RE_ALARM_RELAY_TOGGLE
+} re_alarm_event_id_t;
 
 // -----------------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------- Структуры ---------------------------------------------------------
@@ -127,9 +135,14 @@ typedef enum {
 
 // Параметры зоны
 typedef struct alarmZone_t {
-  alarm_zone_t type;
   const char* name;
-  uint16_t responses[ASM_ALARM_MAX];
+  cb_mqtt_publish_t mqtt_publish = nullptr;
+  char* mqtt_topic_local = nullptr;
+  char* mqtt_topic_public = nullptr;
+  cb_relay_control_t relay_ctrl = nullptr;
+  bool relay_state = false;
+  uint16_t resp_set[ASM_MAX];
+  uint16_t resp_clr[ASM_MAX];
   STAILQ_ENTRY(alarmZone_t) next;
 } alarmZone_t;
 // Ссылка-указатель на параметры зоны
@@ -140,13 +153,12 @@ static const uint32_t ALARM_VALUE_NONE = 0xFFFFFFFF;
 // Параметры события (сигнала с датчика)
 typedef struct alarmEvent_t {
   alarm_event_t type;
-  alarmZoneHandle_t* zone;
+  alarmZoneHandle_t zone;
+  bool state;
   uint32_t value_set;
   uint32_t value_clr;
   uint16_t threshold;
   uint32_t timeout;
-  uint16_t value_set_count;
-  uint16_t value_clr_count;
   uint32_t events_count;
   time_t   event_last;
 } alarmEvent_t;
@@ -164,6 +176,12 @@ typedef struct alarmSensor_t {
 // Ссылка-указатель на параметры датчика
 typedef alarmSensor_t *alarmSensorHandle_t;
 
+// Данные для обаботки события
+typedef struct {
+  alarmSensorHandle_t sensor;
+  alarmEventHandle_t event;
+} alarmEventData_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -173,15 +191,22 @@ extern "C" {
 // -----------------------------------------------------------------------------------------------------------------------
 
 /**
+ * Инициализация сигнализации 
+ * @brief Запуск таймеров сирены, флешера, регистрация параметров
+ * */
+bool alarmSystemInit(cb_alarm_change_mode_t cb_mode);
+
+/**
  * Создать задачу
  * @brief Создать и запустить задачу ОПС
  * @param siren Ссылка-указатель на виртуальный "светодиод", отвечающий за включение сирены
  * @param flasher Ссылка-указатель на виртуальный "светодиод", отвечающий за включение светового маяка
  * @param ledAlarm Ссылка-указатель на светодиод, индицирующий режим работы
  * @param ledRx433 Ссылка-указатель на светодиод, индицирующий получение события с приемника RX433. Можно использовать тот же, что и ledAlarm
+ * @param cb_mode Функция обратного вызова, вызываемая при изменении режима охраны
  * @return Успех или неуспех
  * */
-bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433);
+bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode);
 
 /**
  * Приостановать задачу
@@ -211,11 +236,16 @@ QueueHandle_t alarmTaskQueue();
 /**
  * Добавить зону
  * @brief Добавить зону в список зон ОПС
- * @param type Тип зоны
  * @param name Понятное наименование зоны
+ * @param topic_local Топик MQTT для публикации состояния сенсоров в "скрытом" виде (для служебного пользования), см. ASR_MQTT_LOCAL
+ * @param topic_public Топик MQTT для публикации состояния сенсоров в виде JSON пакета "для всех", см. ASR_MQTT_PUBLIC
+ * @param cb_mqtt_publish Функция обратного вызова для публикации данных на MQTT
+ * @param cb_relay_ctrl Функция обратного вызова для реакции на события ASR_RELAY_xxx
  * @return Ссылка-указатель на созданную зону
  * */
-alarmZoneHandle_t alarmZoneAdd(alarm_zone_t type, const char* name);
+alarmZoneHandle_t alarmZoneAdd(const char* name, 
+  char* topic_local, char* topic_public, cb_mqtt_publish_t cb_mqtt_publish, 
+  cb_relay_control_t cb_relay_ctrl);
 
 /**
  * Добавить реакции на события
@@ -223,9 +253,10 @@ alarmZoneHandle_t alarmZoneAdd(alarm_zone_t type, const char* name);
  *        Необходимо повторить это опрделение реакций для всех режимов.
  * @param zone Ссылка-указатель на зону
  * @param mode Выбранный режим
- * @param resonses Битовая маска, указывающая как регировать на событие в данной зоне для данного режима
+ * @param resp_set Битовая маска, указывающая как регировать на активацию события в данной зоне для данного режима
+ * @param resp_clr Битовая маска, указывающая как регировать на сброс события в данной зоне для данного режима
  * */
-void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t responses);
+void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_set, uint16_t resp_clr);
 
 /**
  * Добавить датчик
