@@ -32,24 +32,23 @@
  * */
 static const uint16_t ASR_COUNT_INC    = BIT0;  // Увеличить счетчик тревог
 static const uint16_t ASR_COUNT_DEC    = BIT1;  // Уменьшить счетчик тревог
-static const uint16_t ASR_MQTT_LOCAL   = BIT2;  // Публикация события в локальном топике MQTT
-static const uint16_t ASR_MQTT_PUBLIC  = BIT3;  // Публикация события в публичном топике MQTT
-static const uint16_t ASR_EMAIL        = BIT4;  // Уведомление на электронную почту
-static const uint16_t ASR_TELEGRAM     = BIT5;  // Уведомление в Telegram
-static const uint16_t ASR_SIREN        = BIT6;  // Включить сирену
-static const uint16_t ASR_FLASHER      = BIT7;  // Включить маячок
-static const uint16_t ASR_BUZZER       = BIT8;  // Звуковой сигнал на пульте
-static const uint16_t ASR_RELAY_ON     = BIT9;  // Включить реле (нагрузку)
-static const uint16_t ASR_RELAY_OFF    = BIT10;  // Выключить реле (нагрузку)
-static const uint16_t ASR_RELAY_SWITCH = BIT11;  // Переключить реле (нагрузку)
+static const uint16_t ASR_MQTT_EVENT   = BIT2;  // Публикация события на MQTT
+static const uint16_t ASR_MQTT_STATUS  = BIT3;  // Публикация состояния охраны на MQTT
+static const uint16_t ASR_TELEGRAM     = BIT4;  // Уведомление в Telegram
+static const uint16_t ASR_SIREN        = BIT5;  // Включить сирену
+static const uint16_t ASR_FLASHER      = BIT6;  // Включить маячок
+static const uint16_t ASR_BUZZER       = BIT7;  // Звуковой сигнал на пульте
+static const uint16_t ASR_RELAY_ON     = BIT8;  // Включить реле (нагрузку)
+static const uint16_t ASR_RELAY_OFF    = BIT9;  // Выключить реле (нагрузку)
+static const uint16_t ASR_RELAY_SWITCH = BIT10;  // Переключить реле (нагрузку)
 
 // "Стандартные" наборы реакций
-static const uint16_t ASRS_NONE        = 0x0000; // Никаой реакции (по умолчанию)
-static const uint16_t ASRS_CONTROL     = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
-static const uint16_t ASRS_REGISTER    = ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC;
-static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER;
-static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
-static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_LOCAL | ASR_MQTT_PUBLIC | ASR_EMAIL | ASR_TELEGRAM | ASR_BUZZER | ASR_SIREN | ASR_FLASHER;
+static const uint16_t ASRS_NONE        = 0x0000; // Никакой реакции (по умолчанию)
+static const uint16_t ASRS_CONTROL     = ASR_MQTT_EVENT;
+static const uint16_t ASRS_REGISTER    = ASR_COUNT_INC | ASR_MQTT_EVENT;
+static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER;
+static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
+static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_SIREN | ASR_FLASHER;
 
 /**
  * ТИП ДАТЧИКА
@@ -64,6 +63,18 @@ typedef enum {
 } alarm_sensor_type_t;
 
 /**
+ * ИСТОЧНИК СИГНАЛА УПРАВЛЕНИЯ
+ * 
+ * Через какой из каналов управления поступил сигнал на переключение режима работы
+ * */
+typedef enum {
+  ACC_STORED = 0,         // Режим считан из памяти
+  ACC_BUTTONS,            // Переключение с помощью кнопок на устройстве
+  ACC_RCONTROL,           // Переключение с помощью дистанционного пульта управления
+  ACC_MQTT                // Переключение через MQTT
+} alarm_control_t;  
+
+/**
  * РЕЖИМ РАБОТЫ
  * 
  * Режим работы определяет реакцию на события в зависимости от типа зоны
@@ -76,7 +87,7 @@ typedef enum {
   ASM_MAX                // Not used, it's just a counter
 } alarm_mode_t;
 
-typedef void (*cb_alarm_change_mode_t) (alarm_mode_t mode);
+typedef void (*cb_alarm_change_mode_t) (alarm_mode_t mode, alarm_control_t source);
 
 /**
  * ТИП СОБЫТИЯ
@@ -90,11 +101,10 @@ typedef enum {
   ASE_POWER_ON,           // Питание восстановлено
   ASE_POWER_OFF,          // Питание отсутствует
   ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
-  ASE_BUTTON,             // Нажата тревожная кнопка
-  ASE_RCTRL_OFF,          // Пульт: режим охраны отключен
-  ASE_RCTRL_ON,           // Пульт: режим охраны включен
-  ASE_RCTRL_PERIMETER,    // Пульт: режим охраны периметра
-  ASE_RCTRL_OUTBUILDINGS  // Пульт: режим охраны внешних помещений
+  ASE_CTRL_OFF,           // Пульт: режим охраны отключен
+  ASE_CTRL_ON,            // Пульт: режим охраны включен
+  ASE_CTRL_PERIMETER,     // Пульт: режим охраны периметра
+  ASE_CTRL_OUTBUILDINGS   // Пульт: режим охраны внешних помещений
 } alarm_event_t;
 
 /**
@@ -128,9 +138,7 @@ typedef enum {
 // Параметры зоны
 typedef struct alarmZone_t {
   const char* name;
-  cb_mqtt_publish_t mqtt_publish = nullptr;
-  char* mqtt_topic_local = nullptr;
-  char* mqtt_topic_public = nullptr;
+  const char* topic;
   cb_relay_control_t relay_ctrl = nullptr;
   bool relay_state = false;
   uint16_t resp_set[ASM_MAX];
@@ -151,9 +159,10 @@ typedef struct alarmEvent_t {
   uint32_t value_set;
   uint32_t value_clr;
   uint16_t threshold;
-  uint32_t timeout;
+  uint32_t timeout_clr;
   uint32_t events_count;
   time_t   event_last;
+  esp_timer_handle_t timer_clr = nullptr;
 } alarmEvent_t;
 // Ссылка-указатель на параметры события
 typedef alarmEvent_t *alarmEventHandle_t;
@@ -162,6 +171,7 @@ typedef alarmEvent_t *alarmEventHandle_t;
 typedef struct alarmSensor_t {
   alarm_sensor_type_t type;
   const char* name;
+  const char* topic;
   uint32_t address;
   alarmEvent_t events[CONFIG_ALARM_MAX_EVENTS];
   STAILQ_ENTRY(alarmSensor_t) next;
@@ -230,15 +240,11 @@ QueueHandle_t alarmTaskQueue();
  * Добавить зону
  * @brief Добавить зону в список зон ОПС
  * @param name Понятное наименование зоны
- * @param topic_local Топик MQTT для публикации состояния сенсоров в "скрытом" виде (для служебного пользования), см. ASR_MQTT_LOCAL
- * @param topic_public Топик MQTT для публикации состояния сенсоров в виде JSON пакета "для всех", см. ASR_MQTT_PUBLIC
- * @param cb_mqtt_publish Функция обратного вызова для публикации данных на MQTT
+ * @param topic Субтопик для публикации данных с сенсоров зоны
  * @param cb_relay_ctrl Функция обратного вызова для реакции на события ASR_RELAY_xxx
  * @return Ссылка-указатель на созданную зону
  * */
-alarmZoneHandle_t alarmZoneAdd(const char* name, 
-  char* topic_local, char* topic_public, cb_mqtt_publish_t cb_mqtt_publish, 
-  cb_relay_control_t cb_relay_ctrl);
+alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_control_t cb_relay_ctrl);
 
 /**
  * Добавить реакции на события
@@ -256,10 +262,11 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
  * @brief Добавить датчик в список ОПС. Датчик не привязан к зоне, к зонам привязаны события датчика
  * @param type Тип датчика
  * @param name Понятное наименование датчика
+ * @param topic Субтопик для публикации данных с датчика
  * @param address Адрес датчика для беспроводных датчиков или номер вывода GPIO для проводных зон
  * @return Ссылка-указатель на созданную зону
  * */
-alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, uint32_t address);
+alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address);
 
 /**
  * Добавить событие датчика
@@ -272,10 +279,10 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, u
  * @param value_set Значение для установки статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
  * @param value_clear Значение для сброса статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
  * @param threshold Пороговое значение. Должно придти не менее заданного значения команд подряд в течение timeout. Имеет смысл для беспроводных датчиков, чтобы исключить ложные срабатывания
- * @param timeout Таймаут в миллисекундах. Используется для сброса статуса тревоги после получения последней команды value_set и при threshold больше 1
+ * @param timeout_clr Таймаут в миллисекундах. Используется для сброса статуса тревоги после получения последней команды value_set
  * */
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, const char* message, 
-  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout);
+  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout_clr);
 
 #ifdef __cplusplus
 }

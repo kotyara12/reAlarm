@@ -1,0 +1,7 @@
+Базовый топик системы охраны:                 %location%/security
+Режим охраны (публикация):                    %location%/security/config 
+Режим охраны (подтверждение):                 %location%/security/confirm
+Параметры охраны устройства (публикация):     %location%/security/config/%device% 
+Параметры охраны устройства (подтверждение):  %location%/security/confirm/%device%
+Состояние охраны:                             %location%/security/status/%device%
+Топик данных с сенсоров:                      %location%/security/sensors/%device%/%zone%/%sensor%/%event%

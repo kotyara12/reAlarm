@@ -1,10 +1,12 @@
 #include "reAlarm.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <time.h>
 #include "esp_err.h"
+#include "esp_timer.h"
 #include <driver/gpio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,13 +16,14 @@
 #include "reParams.h"
 #include "reEvents.h"
 #include "reBeep.h"
+#include "reMqtt.h"
+#include "reStates.h"
 #if CONFIG_TELEGRAM_ENABLE
 #include "reTgSend.h"
 #endif // CONFIG_TELEGRAM_ENABLE
 #include "project_config.h"
 #include "def_consts.h"
 #include "def_alarm.h"
-
 
 static const char* logTAG = "ALARM";
 static const char* alarmTaskName = "alarm";
@@ -49,6 +52,7 @@ static paramsEntryHandle_t _alarmParamMode = nullptr;
 static cb_alarm_change_mode_t _alarmOnChangeMode = nullptr;
 static uint32_t _alarmCount = 0;
 
+static void alarmSensorsReset();
 static void alarmSirenAlarmOff();
 static void alarmFlasherAlarmOff();
 static void alarmSirenChangeMode();
@@ -69,55 +73,80 @@ static const char* alarmModeText(alarm_mode_t mode)
   };
 }
 
-static void alarmModeChange(alarm_mode_t newMode, bool forced)
+static const char* alarmSourceText(alarm_control_t source, const char* sensor) 
+{
+  switch (source) {
+    case ACC_STORED: 
+      return CONFIG_ALARM_SOURCE_STORED;
+    case ACC_BUTTONS:
+      return CONFIG_ALARM_SOURCE_BUTTONS;
+    case ACC_RCONTROL:
+      if (sensor) {
+        return sensor;
+      } else {
+        return CONFIG_ALARM_SOURCE_RCONTROL;
+      };
+    default:
+      return CONFIG_ALARM_SOURCE_MQTT;
+  };
+}
+
+static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const char* sensor, bool forced)
 {
   bool alarmModeChanged = newMode != _alarmMode;
   if (forced || alarmModeChanged) {
+    // Save and publish new value
     if (alarmModeChanged) {
-      // Save and publish new value
       _alarmMode = newMode;
       if (_alarmParamMode) {
         paramsValueStore(_alarmParamMode, false);
       };
-      // Disable siren if ASM_DISABLED mode is set
-      if (newMode == ASM_DISABLED) {
-        alarmSirenAlarmOff();
-        alarmFlasherAlarmOff();
-      };
-      // One-time siren signal when switching the arming mode
-      alarmSirenChangeMode();
-      alarmFlasherChangeMode();
-      alarmBuzzerChangeMode();
     };
+
+    // Reset counters
+    if (alarmModeChanged && (newMode != ASM_DISABLED)) {
+      alarmSensorsReset();
+    };
+
+    // Disable siren if ASM_DISABLED mode is set
+    if (newMode == ASM_DISABLED) {
+      alarmSirenAlarmOff();
+      alarmFlasherAlarmOff();
+    };
+
+    // One-time siren signal when switching the arming mode
+    alarmSirenChangeMode();
+    alarmFlasherChangeMode();
+    alarmBuzzerChangeMode();
     
     switch (_alarmMode) {
       // Security mode is on
       case ASM_ARMED:
         rlog_w(logTAG, "Full security mode activated");
-        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_ARMED, nullptr, 0, portMAX_DELAY);
+        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_ARMED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED);
+            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
 
       // Perimeter security mode
       case ASM_PERIMETER:
         rlog_w(logTAG, "Perimeter security mode activated");
-        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_PERIMETER, nullptr, 0, portMAX_DELAY);
+        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_PERIMETER, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_PERIMETER);
+            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_PERIMETER, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
 
       // Outbuilding security regime
       case ASM_OUTBUILDINGS:
         rlog_w(logTAG, "Outbuildings security mode activated");
-        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_OUTBUILDINGS, nullptr, 0, portMAX_DELAY);
+        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_OUTBUILDINGS, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_OUTBUILDINGS);
+            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_OUTBUILDINGS, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
 
@@ -125,17 +154,17 @@ static void alarmModeChange(alarm_mode_t newMode, bool forced)
       default:
         _alarmCount = 0;
         rlog_w(logTAG, "Security mode disabled");
-        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, nullptr, 0, portMAX_DELAY);
+        eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_DISABLED);
+            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_DISABLED, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
     };
     
     // Callback
     if (_alarmOnChangeMode) {
-      _alarmOnChangeMode(_alarmMode);
+      _alarmOnChangeMode(_alarmMode, source);
     };
   };
 }
@@ -272,34 +301,40 @@ static void alarmSirenChangeMode()
 // ------------------------------------------------------ Buzzer ---------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+static bool _alarmBuzzerEnabled = true;
+
 static void alarmBuzzerChangeMode()
 {
-  if (_alarmMode == ASM_DISABLED) {
-    if (_alarmCount > 0) {
-      beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
-        CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
+  if (_alarmBuzzerEnabled) {
+    if (_alarmMode == ASM_DISABLED) {
+      if (_alarmCount > 0) {
+        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
+          CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
+      } else {
+        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
+          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
+      };
+    } else if (_alarmMode == ASM_ARMED) {
+      beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_ARMED_DURATION, 
+        CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
     } else {
-      beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
-        CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
+      beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
+        CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
     };
-  } else if (_alarmMode == ASM_ARMED) {
-    beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
-      CONFIG_ALARM_BUZZER_ARMED_DURATION, 
-      CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
-  } else {
-    beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
-      CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
-      CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
   };
 }
 
 static void alarmBuzzerAlarmOn()
 {
-  beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
-    CONFIG_ALARM_BUZZER_ALARM_DURATION, 
-    CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
+  if (_alarmBuzzerEnabled) {
+    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
+      CONFIG_ALARM_BUZZER_ALARM_DURATION, 
+      CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
+  };
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -426,11 +461,18 @@ static void alarmFlasherAlarmOff()
 // --------------------------------------------------- Initialization ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+static void alarmWifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  alarmModeChange(_alarmMode, ACC_STORED, nullptr, true);
+  eventHandlerUnregister(RE_WIFI_EVENTS, RE_WIFI_STA_PING_OK, alarmWifiEventHandler);
+}
+
 static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
   if (*(uint32_t*)event_data == (uint32_t)&_alarmMode) {
-    if ((event_id == RE_PARAMS_CHANGED) || (event_id == RE_PARAMS_RESTORED))  {
-      alarmModeChange(_alarmMode, true);
+    rlog_v(logTAG, "Security mode changed via MQTT, event_id=%d", event_id);
+    if (event_id == RE_PARAMS_CHANGED)  {
+      alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true);
     };
   };
 }
@@ -444,6 +486,7 @@ static bool alarmParamsRegister()
       CONFIG_ALARM_PARAMS_MODE_KEY, CONFIG_ALARM_PARAMS_MODE_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmMode);
   paramsSetLimitsU8(_alarmParamMode, (uint8_t)ASM_DISABLED, (uint8_t)ASM_MAX-1);
   _alarmParamMode->notify = (CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE == 0);
+  eventHandlerRegister(RE_WIFI_EVENTS, RE_WIFI_STA_PING_OK, alarmWifiEventHandler, nullptr);
 
   paramsSetLimitsU32(
     paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
@@ -453,6 +496,10 @@ static bool alarmParamsRegister()
     paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
       CONFIG_ALARM_PARAMS_FLASHER_DUR_KEY, CONFIG_ALARM_PARAMS_FLASHER_DUR_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_flasherDuration),
     CONFIG_ALARM_PARAMS_MIN_DURATION, CONFIG_ALARM_PARAMS_MAX_DURATION);
+  paramsSetLimitsU8(
+    paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_I8, nullptr, pgSecurity, 
+        CONFIG_ALARM_PARAMS_BUZZER_KEY, CONFIG_ALARM_PARAMS_BUZZER_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmBuzzerEnabled),
+    0, 1);
 
   return eventHandlerRegister(RE_PARAMS_EVENTS, ESP_EVENT_ANY_ID, &alarmParamsEventHandler, nullptr);
 }
@@ -497,9 +544,7 @@ void alarmZonesFree()
   };
 }
 
-alarmZoneHandle_t alarmZoneAdd(const char* name, 
-  char* topic_local, char* topic_public, cb_mqtt_publish_t cb_mqtt_publish, 
-  cb_relay_control_t cb_relay_ctrl)
+alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_control_t cb_relay_ctrl)
 {
   if (!alarmZones) {
     alarmZonesInit();
@@ -508,9 +553,7 @@ alarmZoneHandle_t alarmZoneAdd(const char* name,
     alarmZoneHandle_t item = (alarmZoneHandle_t)calloc(1, sizeof(alarmZone_t));
     if (item) {
       item->name = name;
-      item->mqtt_topic_local = topic_local;
-      item->mqtt_topic_public = topic_public;
-      item->mqtt_publish = cb_mqtt_publish;
+      item->topic = topic;
       item->relay_ctrl = cb_relay_ctrl;
       item->relay_state = false;
       for (size_t i = 0; i < ASM_MAX; i++) {
@@ -525,8 +568,67 @@ alarmZoneHandle_t alarmZoneAdd(const char* name,
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
-// ------------------------------------------------- Notifications -------------------------------------------------------
+// ------------------------------------------------------ MQTT -----------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
+
+static const char* alarmMqttEventTopic(alarm_event_t type)
+{
+  switch (type) {
+    case ASE_TAMPER:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_TAMPER;
+    case ASE_POWER_ON:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_POWER_ON;
+    case ASE_POWER_OFF:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_POWER_OFF;
+    case ASE_LOW_BATTERY:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_BATTERY;
+    case ASE_CTRL_OFF:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OFF;
+    case ASE_CTRL_ON:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_ON;
+    case ASE_CTRL_PERIMETER:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_PERIMETER;
+    case ASE_CTRL_OUTBUILDINGS:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OUTBUILDINGS;
+    default:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_ALARM;
+  };
+}
+
+static void alarmMqttPublishEvent(alarmEventData_t event_data)
+{
+  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
+    char* topicSensor = nullptr;
+    #if CONFIG_ALARM_MQTT_DEVICE
+      topicSensor = mqttGetTopicDevice4(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+        alarmMqttEventTopic(event_data.event->type)); 
+    #else
+      topicSensor = mqttGetTopicSpecial3(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+        alarmMqttEventTopic(event_data.event->type)); 
+    #endif // CONFIG_ALARM_MQTT_DEVICE
+
+    if (topicSensor) {
+      mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_STATUS), 
+        malloc_stringf("%d", event_data.event->state), 
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, true, true, true);
+
+      char* ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
+      if (ts) {
+        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_JSON), 
+          malloc_stringf("{\"status\":%d,\"time\":\"%s\",\"unixtime\":%d,\"count\":%d}", 
+            event_data.event->state, ts, event_data.event->event_last, event_data.event->events_count), 
+          CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, true, true, true);
+        free(ts);
+      };
+      
+      free(topicSensor);
+    } else {
+      rlog_e(logTAG, "Failed to generate a topic for publishing an event \"%s\"", event_data.event->message);
+    }
+  };
+}
 
 // -----------------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------- Responses ---------------------------------------------------------
@@ -540,7 +642,70 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
   }
 }
 
-void alarmResponsesProcess(bool state, alarmEventData_t event_data)
+static alarm_control_t alarmResponsesSource(alarmEventData_t event_data)
+{
+  if (event_data.sensor->type == AST_WIRED) {
+    return ACC_BUTTONS;
+  } else if (event_data.sensor->type == AST_MQTT) {
+    return ACC_MQTT;
+  } else {
+    return ACC_RCONTROL;
+  };
+}
+
+static void alarmResponsesProcess(bool state, alarmEventData_t event_data);
+static void alarmResponsesClrTimerEnd(void* arg)
+{
+  alarmEventData_t* event_data = (alarmEventData_t*)arg;
+  if (event_data) {
+    alarmResponsesProcess(false, *event_data);
+    free(event_data);
+  };
+}
+
+static void alarmResponsesClrTimerCreate(alarmEventData_t event_data)
+{
+  esp_err_t err = ESP_OK;
+  if (event_data.event->timer_clr) {
+    if (esp_timer_is_active(event_data.event->timer_clr)) {
+      err = esp_timer_stop(event_data.event->timer_clr);
+      if (err != ESP_OK) {
+        rlog_e(logTAG, "Failed to stop event timer!");
+        return;
+      };
+    };
+  } else {
+    void* timer_data = (alarmEventData_t*)malloc(sizeof(alarmEventData_t));
+    if (timer_data) {
+      memcpy(timer_data, &event_data, sizeof(alarmEventData_t));
+
+      esp_timer_create_args_t timer_args;
+      memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
+      timer_args.callback = &alarmResponsesClrTimerEnd;
+      timer_args.name = "timer_event";
+      timer_args.arg = timer_data;
+
+      err = esp_timer_create(&timer_args, &event_data.event->timer_clr);
+      if (err != ESP_OK) {
+        rlog_e(logTAG, "Failed to create event timer!");
+        return;
+      };
+    } else {
+      rlog_e(logTAG, "Failed to allocate timer data!");
+      return;
+    };
+  };
+  
+  if (event_data.event->timer_clr) {
+    err = esp_timer_start_once(event_data.event->timer_clr, 1000 * event_data.event->timeout_clr);
+    if (err != ESP_OK) {
+      rlog_e(logTAG, "Failed to start event timer");
+      return;
+    };
+  };
+}
+
+static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
 {
   uint16_t responses = 0;
   if (state) {
@@ -551,12 +716,15 @@ void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     event_data.event->event_last = time(nullptr);
     event_data.event->events_count++;
     event_data.event->state = true;
-
     if ((_alarmMode != ASM_DISABLED) && (responses & ASR_COUNT_INC) && (_alarmCount < UINT32_MAX)) {
       _alarmCount++;
     };
 
     eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_SIGNAL_SET, &event_data, sizeof(alarmEventData_t), portMAX_DELAY);
+
+    if (event_data.event->timeout_clr > 0) {
+      alarmResponsesClrTimerCreate(event_data);
+    };
   } else {
     rlog_d(logTAG, "Clear signal for sensor: [ %s ], zone: [ %s ], type: [ %d ]", 
       event_data.sensor->name, event_data.event->zone->name, event_data.event->type);
@@ -569,40 +737,53 @@ void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
 
     eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_SIGNAL_CLEAR, &event_data, sizeof(alarmEventData_t), portMAX_DELAY);
+
+    if (event_data.event->timer_clr) {
+      esp_timer_delete(event_data.event->timer_clr);
+      event_data.event->timer_clr = nullptr;
+    };
   };
 
   // Handling arming switch events
-  if (event_data.event->type == ASE_RCTRL_OFF) {
+  if (event_data.event->type == ASE_CTRL_OFF) {
     // If the alarm is currently on, then first we just reset the alarm
     if (_sirenActive || _flasherActive) {
       alarmSirenAlarmOff();
       alarmFlasherAlarmOff();
+      #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+        tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
+          alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
+      #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
     } else {
-      alarmModeChange(ASM_DISABLED, false);
+      alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false);
     };
-  } else if (event_data.event->type == ASE_RCTRL_ON) {
-    alarmModeChange(ASM_ARMED, false);
-  } else if (event_data.event->type == ASE_RCTRL_PERIMETER) {
-    alarmModeChange(ASM_PERIMETER, false);
-  } else if (event_data.event->type == ASE_RCTRL_OUTBUILDINGS) {
-    alarmModeChange(ASM_OUTBUILDINGS, false);
+  } else if (event_data.event->type == ASE_CTRL_ON) {
+    alarmModeChange(ASM_ARMED, alarmResponsesSource(event_data), event_data.sensor->name, false);
+  } else if (event_data.event->type == ASE_CTRL_PERIMETER) {
+    alarmModeChange(ASM_PERIMETER, alarmResponsesSource(event_data), event_data.sensor->name, false);
+  } else if (event_data.event->type == ASE_CTRL_OUTBUILDINGS) {
+    alarmModeChange(ASM_OUTBUILDINGS, alarmResponsesSource(event_data), event_data.sensor->name, false);
   };
 
-  // Posting status on MQTT
-  if (responses & ASR_MQTT_LOCAL) {
+  // Posting event on MQTT
+  if (responses & ASR_MQTT_EVENT) {
+    alarmMqttPublishEvent(event_data);
   };
-  if (responses & ASR_MQTT_PUBLIC) {
-  };
-
+  
   // Sound and visual notification
   if (responses & ASR_SIREN) {
     if (state) {
       alarmSirenAlarmOn();
+    } else {
+      alarmSirenAlarmOff();
     };
   };
   if (responses & ASR_FLASHER) {
     if (state) {
       alarmFlasherAlarmOn();
+    } else {
+      alarmFlasherAlarmOff();
     };
   };
   if (responses & ASR_BUZZER) {
@@ -631,22 +812,37 @@ void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
   };
 
-  // Sending notifications
-  if (responses & ASR_EMAIL) {
+  // Posting status on MQTT
+  if (responses & ASR_MQTT_STATUS) {
   };
+
+  // Sending notifications
   if (responses & ASR_TELEGRAM) {
     #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
       char* ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
       if (event_data.event->message && ts) {
         tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
           CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
-            event_data.event->message, alarmModeText(_alarmMode), 
-            event_data.event->zone->name, event_data.sensor->name,
+            event_data.event->message, 
+            event_data.sensor->name, event_data.event->zone->name,
+            alarmModeText(_alarmMode), 
             _sirenActive ? CONFIG_ALARM_SIREN_ENABLED : CONFIG_ALARM_SIREN_DISABLED,
             ts, event_data.event->events_count);
         free(ts);
       };
     #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
+  };
+}
+
+static void alarmResponsesUpdateTimeout(alarmEventData_t event_data)
+{
+  rlog_d(logTAG, "Update signal for sensor: [ %s ], zone: [ %s ], type: [ %d ]", 
+    event_data.sensor->name, event_data.event->zone->name, event_data.event->type);
+
+  event_data.event->event_last = time(nullptr);
+
+  if (event_data.event->timeout_clr > 0) {
+    alarmResponsesClrTimerCreate(event_data);
   };
 }
 
@@ -681,7 +877,7 @@ void alarmSensorsFree()
   };
 }
 
-alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, uint32_t address)
+alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address)
 {
   if (!alarmSensors) {
     alarmSensorsInit();
@@ -690,6 +886,7 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, u
     alarmSensorHandle_t item = (alarmSensorHandle_t)calloc(1, sizeof(alarmSensor_t));
     if (item) {
       item->name = name;
+      item->topic = topic;
       item->type = type;
       item->address = address;
       for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
@@ -699,7 +896,7 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, u
         item->events[i].value_set = 0;
         item->events[i].value_clr = 0;
         item->events[i].threshold = 0;
-        item->events[i].timeout = 0;
+        item->events[i].timeout_clr = 0;
         item->events[i].events_count = 0;
         item->events[i].event_last = 0;
       };
@@ -710,12 +907,26 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, u
   return nullptr;
 }
 
+static void alarmSensorsReset()
+{
+  if (alarmSensors) {
+    alarmSensorHandle_t itemS;
+    STAILQ_FOREACH(itemS, alarmSensors, next) {
+      for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
+        if (itemS->events[i].type == ASE_ALARM) {
+          itemS->events[i].events_count = 0;
+        };
+      };
+    };
+  };
+}
+
 // -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------- Sensor events -------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, const char* message, 
-  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout)
+  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout_clr)
 {
   if ((sensor) && (zone) && (index<CONFIG_ALARM_MAX_EVENTS)) {
     sensor->events[index].zone = zone;
@@ -725,9 +936,10 @@ void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t i
     sensor->events[index].value_set = value_set;
     sensor->events[index].value_clr = value_clear;
     sensor->events[index].threshold = threshold;
-    sensor->events[index].timeout = timeout;
+    sensor->events[index].timeout_clr = timeout_clr;
     sensor->events[index].events_count = 0;
     sensor->events[index].event_last = 0;
+    sensor->events[index].timer_clr = nullptr;
   };
 }
 
@@ -744,7 +956,7 @@ bool alarmEventCheckAddress(const reciever_data_t data, alarmSensorHandle_t sens
   return false;
 }
 
-bool alarmEventCheckValueSet(const reciever_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
+static bool alarmEventCheckValueSet(const reciever_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
 {
   switch (type) {
     case AST_RX433_GENERIC:
@@ -757,7 +969,7 @@ bool alarmEventCheckValueSet(const reciever_data_t data, alarm_sensor_type_t typ
   return false;
 }
 
-bool alarmEventCheckValueClr(const reciever_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
+static bool alarmEventCheckValueClr(const reciever_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
 {
   switch (type) {
     case AST_RX433_GENERIC:
@@ -770,7 +982,7 @@ bool alarmEventCheckValueClr(const reciever_data_t data, alarm_sensor_type_t typ
   return false;
 }
 
-bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_packet)
+static bool alarmProcessIncomingData(const reciever_data_t data, bool processed, bool end_of_packet)
 {
   // Log
   rlog_w(logTAG, "Incoming message:: source: %d, protocol: %d, count: %d, value: 0x%.8X / %d, address: %.8X, command: %02X", 
@@ -787,15 +999,21 @@ bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_packet)
         if (sensor->events[i].type != ASE_EMPTY) {
           if (alarmEventCheckValueSet(data, sensor->type, &sensor->events[i])) {
             if (data.count >= sensor->events[i].threshold) {
-              alarmEventData_t event_data = {sensor, &sensor->events[i]};  
-              alarmResponsesProcess(true, event_data);
+              alarmEventData_t event_data = {sensor, &sensor->events[i]};
+              if (processed && sensor->events[i].timer_clr) {
+                if ((sensor->events[i].type == ASE_ALARM) || (sensor->events[i].type == ASE_TAMPER)) {
+                  alarmResponsesUpdateTimeout(event_data);
+                };
+              } else {
+                alarmResponsesProcess(true, event_data);
+              };
               return true;
             } else {
               return false;
             };
           } else if (alarmEventCheckValueClr(data, sensor->type, &sensor->events[i])) {
-            if (data.count >= sensor->events[i].threshold) {
-              alarmEventData_t event_data = {sensor, &sensor->events[i]};  
+            if (!processed && (data.count >= sensor->events[i].threshold)) {
+              alarmEventData_t event_data = {sensor, &sensor->events[i]};
               alarmResponsesProcess(false, event_data);
               return true;
             } else {
@@ -807,7 +1025,7 @@ bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_packet)
     };
   };
 
-  if (end_of_packet && (data.value > 0xffff)) {
+  if (!processed && end_of_packet && (data.value > 0xffff)) {
     if (sensor) {
       // Sensor found, but no command defined
       rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data.value, sensor->name);
@@ -832,7 +1050,7 @@ bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_packet)
 // -------------------------------------------------- Task function ------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-void alarmTaskExec(void *pvParameters)
+static void alarmTaskExec(void *pvParameters)
 {
   static reciever_data_t data;
   static reciever_data_t last = {RTM_NONE, 0, 0, 0};
@@ -850,12 +1068,12 @@ void alarmTaskExec(void *pvParameters)
         if ((data.source == last.source) && (data.address == last.address) && (data.value == last.value)) {
           last.count++;
           if (!signal_processed && (last.count == CONFIG_ALARM_THRESHOLD_RF)) {
-            signal_processed = alarmProcessIncomingData(last, false);
+            signal_processed = alarmProcessIncomingData(last, signal_processed, false);
           };
         } else {
           // Push the previous signal for further processing
           if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
-            alarmProcessIncomingData(last, true);
+            alarmProcessIncomingData(last, signal_processed, true);
           };
           // Set new data to last and reset the counter (we don't really need it), instead we will count the number of packets
           last = data;
@@ -868,8 +1086,8 @@ void alarmTaskExec(void *pvParameters)
       queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_RF);
     } else {
       // End of transmission, push the previous signal for further processing
-      if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
-        alarmProcessIncomingData(last, true);
+      if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0)) {
+        alarmProcessIncomingData(last, signal_processed, true);
       };
 
       // Clear buffer
