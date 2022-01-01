@@ -54,6 +54,7 @@ static paramsEntryHandle_t _alarmParamMode = nullptr;
 static cb_alarm_change_mode_t _alarmOnChangeMode = nullptr;
 static uint32_t _alarmCount = 0;
 static time_t _alarmLast = 0;
+static alarmEventData_t _alarmLastEvent = {nullptr, nullptr};
 
 static void alarmSensorsReset();
 static void alarmSirenAlarmOff();
@@ -100,11 +101,13 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 {
   bool alarmModeChanged = newMode != _alarmMode;
   if (forced || alarmModeChanged) {
-    // Save and publish new value
-    if (alarmModeChanged) {
-      _alarmMode = newMode;
-      if (_alarmParamMode) {
+    // Store and publish new value
+    if (_alarmParamMode) {
+      if (alarmModeChanged) {
+        _alarmMode = newMode;
         paramsValueStore(_alarmParamMode, false);
+      } else {
+        paramsMqttPublish(_alarmParamMode, true);
       };
     };
 
@@ -112,6 +115,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     if (alarmModeChanged && (newMode != ASM_DISABLED)) {
       _alarmCount = 0;
       _alarmLast = 0;
+      _alarmLastEvent = {nullptr, nullptr};
       alarmSensorsReset();
     };
 
@@ -126,7 +130,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     alarmFlasherChangeMode();
     alarmBuzzerChangeMode();
     
-    // Publish ststus on MQTT broker
+    // Publish current mode and status on MQTT broker
     if (publish_status) {
       alarmMqttPublishStatus();
     };
@@ -494,10 +498,11 @@ static void alarmSirenChangeMode()
 // --------------------------------------------------- Initialization ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-static void alarmWifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static void alarmMqttEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
+  rlog_v(logTAG, "Restore security mode...");
   alarmModeChange(_alarmMode, ACC_STORED, nullptr, true, true);
-  eventHandlerUnregister(RE_WIFI_EVENTS, RE_WIFI_STA_PING_OK, alarmWifiEventHandler);
+  eventHandlerUnregister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, alarmMqttEventHandler);
 }
 
 static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
@@ -515,11 +520,16 @@ static bool alarmParamsRegister()
   paramsGroupHandle_t pgSecurity = paramsRegisterGroup(nullptr, 
     CONFIG_ALARM_PARAMS_ROOT_KEY, CONFIG_ALARM_PARAMS_ROOT_TOPIC, CONFIG_ALARM_PARAMS_ROOT_FRIENDLY);
   
-  _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
+  #if CONFIG_ALARM_MQTT_DEVICE_MODE
+    _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
       CONFIG_ALARM_PARAMS_MODE_KEY, CONFIG_ALARM_PARAMS_MODE_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmMode);
+  #else
+    _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER_LOCATION, OPT_TYPE_U8, nullptr, pgSecurity, 
+      CONFIG_ALARM_PARAMS_MODE_KEY, CONFIG_ALARM_PARAMS_MODE_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmMode);
+  #endif // CONFIG_ALARM_MQTT_DEVICE_MODE
+  _alarmParamMode->notify = false;
   paramsSetLimitsU8(_alarmParamMode, (uint8_t)ASM_DISABLED, (uint8_t)ASM_MAX-1);
-  _alarmParamMode->notify = (CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE == 0);
-  eventHandlerRegister(RE_WIFI_EVENTS, RE_WIFI_STA_PING_OK, alarmWifiEventHandler, nullptr);
+  eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, alarmMqttEventHandler, nullptr);
 
   paramsSetLimitsU32(
     paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
@@ -703,6 +713,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
       _alarmCount++;
       _alarmLast = event_data.event->event_last;
+      _alarmLastEvent = event_data;
     };
     if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
       _alarmCount--;
@@ -733,6 +744,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
       _alarmCount++;
       _alarmLast = event_data.event->event_last;
+      _alarmLastEvent = event_data;
     };
     if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
       _alarmCount--;
@@ -1140,12 +1152,12 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
   if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
     char* topicSensor = nullptr;
     #if CONFIG_ALARM_MQTT_DEVICE_EVENTS
-      topicSensor = mqttGetTopicDevice4(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
-        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+      topicSensor = mqttGetTopicDevice5(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_EVENTS, event_data.event->zone->topic, event_data.sensor->topic, 
         alarmMqttEventTopic(event_data.event->type)); 
     #else
-      topicSensor = mqttGetTopicSpecial3(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
-        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+      topicSensor = mqttGetTopicSpecial4(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_EVENTS, event_data.event->zone->topic, event_data.sensor->topic, 
         alarmMqttEventTopic(event_data.event->type)); 
     #endif // CONFIG_ALARM_MQTT_DEVICE_EVENTS
 
@@ -1190,21 +1202,21 @@ static void alarmMqttPublishStatus()
     char * topicStatus = nullptr;
 
     #if CONFIG_ALARM_MQTT_DEVICE_STATUS
-      #ifdef CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+      #ifdef CONFIG_ALARM_MQTT_TOPIC_DEVICE
         topicStatus = mqttGetTopicSpecial2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
-          CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE, CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS); 
+          CONFIG_ALARM_MQTT_TOPIC_DEVICE, CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_STATUS); 
       #else 
         topicStatus = mqttGetTopicSpecial1(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
-          CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE, CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT); 
-      #endif // CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+          CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_STATUS); 
+      #endif // CONFIG_ALARM_MQTT_TOPIC_DEVICE
     #else
-      #ifdef CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+      #ifdef CONFIG_ALARM_MQTT_TOPIC_DEVICE
         topicStatus = mqttGetTopicSpecial2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
-          CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS, CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE); 
+          CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_STATUS, CONFIG_ALARM_MQTT_TOPIC_DEVICE); 
       #else 
         topicStatus = mqttGetTopicSpecial1(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
-          CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS); 
-      #endif // CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+          CONFIG_ALARM_MQTT_TOPIC_SECURITY, CONFIG_ALARM_MQTT_TOPIC_STATUS); 
+      #endif // CONFIG_ALARM_MQTT_TOPIC_DEVICE
     #endif // CONFIG_ALARM_MQTT_DEVICE_STATUS
 
     if (topicStatus) {
@@ -1214,6 +1226,12 @@ static void alarmMqttPublishStatus()
       char * jsonTemp = nullptr;
   
       char* lastTS = malloc_timestr_empty(CONFIG_FORMAT_DTS, _alarmLast);
+      const char* lastSensor = nullptr;
+      if (_alarmLastEvent.sensor) {
+        lastSensor = _alarmLastEvent.sensor->name;
+      } else {
+        lastSensor = "";
+      };
 
       alarmZoneHandle_t zone;
       STAILQ_FOREACH(zone, alarmZones, next) {
@@ -1232,13 +1250,13 @@ static void alarmMqttPublishStatus()
 
       if (lastTS) {
         if (jsonZones) {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"alarms_display\":\"%d\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
-            _alarmMode, _alarmCount, lastTS, _alarmLast, _alarmCount, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
+          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"last_sensor\":\"%s\",\"alarms_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
+            _alarmMode, _alarmCount, lastTS, _alarmLast, lastSensor, lastSensor, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
           free(jsonZones);
           free(lastTS);
         } else {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"alarms_display\":\"%d\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
-            _alarmMode, _alarmCount, lastTS, _alarmLast, _alarmCount, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
+          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"last_sensor\":\"%s\",\"alarms_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
+            _alarmMode, _alarmCount, lastTS, _alarmLast, lastSensor, lastSensor, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
           free(lastTS);
         };
       };
