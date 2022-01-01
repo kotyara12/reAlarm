@@ -110,6 +110,8 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 
     // Reset counters
     if (alarmModeChanged && (newMode != ASM_DISABLED)) {
+      _alarmCount = 0;
+      _alarmLast = 0;
       alarmSensorsReset();
     };
 
@@ -128,7 +130,8 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     if (publish_status) {
       alarmMqttPublishStatus();
     };
-    
+
+    // Notifications
     switch (_alarmMode) {
       // Security mode is on
       case ASM_ARMED:
@@ -162,8 +165,6 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 
       // Security mode disabled
       default:
-        _alarmCount = 0;
-        _alarmLast = 0;
         rlog_w(logTAG, "Security mode disabled");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
