@@ -42,6 +42,8 @@ uint8_t _alarmQueueStorage[CONFIG_ALARM_QUEUE_SIZE * ALARM_QUEUE_ITEM_SIZE];
 #endif // CONFIG_ALARM_STATIC_ALLOCATION
 
 #define ERR_CHECK(err, str) if (err != ESP_OK) rlog_e(logTAG, "%s: #%d %s", str, err, esp_err_to_name(err));
+#define ERR_GPIO_SET_MODE "Failed to set GPIO mode"
+#define ERR_GPIO_SET_ISR  "Failed to set GPIO ISR handler"
 
 // -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------ Modes ----------------------------------------------------------
@@ -51,6 +53,7 @@ static alarm_mode_t _alarmMode = ASM_DISABLED;
 static paramsEntryHandle_t _alarmParamMode = nullptr;
 static cb_alarm_change_mode_t _alarmOnChangeMode = nullptr;
 static uint32_t _alarmCount = 0;
+static time_t _alarmLast = 0;
 
 static void alarmSensorsReset();
 static void alarmSirenAlarmOff();
@@ -58,6 +61,8 @@ static void alarmFlasherAlarmOff();
 static void alarmSirenChangeMode();
 static void alarmFlasherChangeMode();
 static void alarmBuzzerChangeMode();
+static void alarmMqttPublishEvent(alarmEventData_t event_data);
+static void alarmMqttPublishStatus();
 
 static const char* alarmModeText(alarm_mode_t mode) 
 {
@@ -91,7 +96,7 @@ static const char* alarmSourceText(alarm_control_t source, const char* sensor)
   };
 }
 
-static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const char* sensor, bool forced)
+static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const char* sensor, bool forced, bool publish_status)
 {
   bool alarmModeChanged = newMode != _alarmMode;
   if (forced || alarmModeChanged) {
@@ -118,6 +123,11 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     alarmSirenChangeMode();
     alarmFlasherChangeMode();
     alarmBuzzerChangeMode();
+    
+    // Publish ststus on MQTT broker
+    if (publish_status) {
+      alarmMqttPublishStatus();
+    };
     
     switch (_alarmMode) {
       // Security mode is on
@@ -153,6 +163,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
       // Security mode disabled
       default:
         _alarmCount = 0;
+        _alarmLast = 0;
         rlog_w(logTAG, "Security mode disabled");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
@@ -170,6 +181,186 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------ Buzzer ---------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+static bool _alarmBuzzerEnabled = true;
+
+static void alarmBuzzerChangeMode()
+{
+  if (_alarmBuzzerEnabled) {
+    if (_alarmMode == ASM_DISABLED) {
+      if (_alarmCount > 0) {
+        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
+          CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
+      } else {
+        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
+          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
+      };
+    } else if (_alarmMode == ASM_ARMED) {
+      beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_ARMED_DURATION, 
+        CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
+    } else {
+      beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
+        CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
+    };
+  };
+}
+
+static void alarmBuzzerAlarmOn()
+{
+  if (_alarmBuzzerEnabled) {
+    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
+      CONFIG_ALARM_BUZZER_ALARM_DURATION, 
+      CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
+  };
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+// ----------------------------------------------------- Flasher ---------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+ledQueue_t _flasher  = nullptr;
+static uint32_t _flasherDuration = CONFIG_ALARM_DURATION_FLASH;
+static esp_timer_handle_t _flasherTimer = nullptr;
+static bool _flasherActive = false;
+
+static void alarmFlasherTimerEnd(void* arg)
+{
+  alarmFlasherAlarmOff();
+  alarmMqttPublishStatus();
+}
+
+static bool alarmFlasherTimerCreate()
+{
+  if (_flasher) {
+    esp_timer_create_args_t flasher_timer_args;
+    memset(&flasher_timer_args, 0, sizeof(esp_timer_create_args_t));
+    flasher_timer_args.callback = &alarmFlasherTimerEnd;
+    flasher_timer_args.name = "timer_flasher";
+    ERR_CHECK(esp_timer_create(&flasher_timer_args, &_flasherTimer), "Failed to create flasher timer");
+    return true;
+  };
+  return false;
+}
+
+static bool alarmFlasherTimerStart()
+{
+  if (_flasherTimer) {
+    if (_flasherDuration > 0) {
+      ERR_CHECK(esp_timer_start_once(_flasherTimer, _flasherDuration * 1000000), "Failed to start flasher timer");
+    } else {
+      if (esp_timer_is_active(_flasherTimer)) {
+        ERR_CHECK(esp_timer_stop(_flasherTimer), "Failed to stop flasher timer");
+      };
+    };
+    return true;
+  };
+  return false;
+}
+
+static bool alarmFlasherTimerStop()
+{
+  if (_flasherTimer && esp_timer_is_active(_flasherTimer)) {
+    ERR_CHECK(esp_timer_stop(_flasherTimer), "Failed to stop flasher timer");
+  };
+  return true;
+}
+
+static void alarmFlasherBlinkOn(uint16_t blink_quantity, uint16_t blink_duration, uint16_t blink_interval)
+{
+  if (blink_quantity > 0) {
+    if (_flasher) {
+      ledTaskSend(_flasher, lmBlinkOn, blink_quantity, blink_duration, blink_interval);
+    };
+    if (_ledAlarm) {
+      ledTaskSend(_ledAlarm, lmBlinkOn, blink_quantity, blink_duration, blink_interval);
+    };
+  } else {
+    if (_flasher) {
+      ledTaskSend(_flasher, lmBlinkOff, 0, 0, 0);
+    };
+    if (_ledAlarm) {
+      ledTaskSend(_ledAlarm, lmBlinkOff, 0, 0, 0);
+    };
+  };
+}
+
+static void alarmFlasherFlashOn(uint16_t flash_quantity, uint16_t flash_duration, uint16_t flash_interval)
+{
+  if (_flasher && (flash_quantity > 0)) {
+    ledTaskSend(_flasher, lmFlash, flash_quantity, flash_duration, flash_interval);
+  };
+}
+
+static void alarmFlasherChangeMode()
+{
+  if (_flasherActive) {
+    rlog_d(logTAG, "Flasher activated");
+    // Alarm now
+    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_ON, nullptr, 0, portMAX_DELAY);
+    alarmFlasherBlinkOn(CONFIG_ALARM_ALARM_QUANTITY, CONFIG_ALARM_ALARM_DURATION, CONFIG_ALARM_ALARM_INTERVAL);
+  } else {
+    if (_alarmMode == ASM_DISABLED) {
+      rlog_d(logTAG, "Flasher disabled");
+      // Security is fully enabled
+      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_OFF, nullptr, 0, portMAX_DELAY);
+      alarmFlasherBlinkOn(0, 0, 0);
+      vTaskDelay(10);
+      if (_alarmCount > 0) {
+        alarmFlasherFlashOn(CONFIG_ALARM_SIREN_DISABLED_WARNING_QUANTITY, CONFIG_ALARM_SIREN_DISABLED_WARNING_DURATION, CONFIG_ALARM_SIREN_DISABLED_WARNING_INTERVAL);
+      } else {
+        alarmFlasherFlashOn(CONFIG_ALARM_SIREN_DISABLED_NORMAL_QUANTITY, CONFIG_ALARM_SIREN_DISABLED_NORMAL_DURATION, CONFIG_ALARM_SIREN_DISABLED_NORMAL_INTERVAL);
+      };
+    } else if (_alarmMode == ASM_ARMED) {
+      rlog_d(logTAG, "Flasher set fully armed");
+      // Security is active
+      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_BLINK, nullptr, 0, portMAX_DELAY);
+      if (_alarmCount == 0) {
+        // All is calm, all is well
+        alarmFlasherBlinkOn(CONFIG_ALARM_ARMED_QUANTITY, CONFIG_ALARM_ARMED_DURATION, CONFIG_ALARM_ARMED_INTERVAL);
+        vTaskDelay(10);
+        alarmFlasherFlashOn(CONFIG_ALARM_SIREN_ARMED_QUANTITY, CONFIG_ALARM_SIREN_ARMED_DURATION, CONFIG_ALARM_SIREN_ARMED_INTERVAL);
+      } else {
+        // Something happened since the last reset
+        alarmFlasherBlinkOn(CONFIG_ALARM_WARNING_QUANTITY, CONFIG_ALARM_WARNING_DURATION, CONFIG_ALARM_WARNING_INTERVAL);
+        vTaskDelay(10);
+        alarmFlasherFlashOn(CONFIG_ALARM_SIREN_ARMED_QUANTITY, CONFIG_ALARM_SIREN_ARMED_DURATION, CONFIG_ALARM_SIREN_ARMED_INTERVAL);
+      };
+    } else {
+      rlog_d(logTAG, "Flasher set partially armed");
+      // Security partially enabled (perimeter only)
+      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_BLINK, nullptr, 0, portMAX_DELAY);
+      alarmFlasherBlinkOn(CONFIG_ALARM_PARTIAL_QUANTITY, CONFIG_ALARM_PARTIAL_DURATION, CONFIG_ALARM_PARTIAL_INTERVAL);
+      vTaskDelay(10);
+      alarmFlasherFlashOn(CONFIG_ALARM_SIREN_PARTIAL_QUANTITY, CONFIG_ALARM_SIREN_PARTIAL_DURATION, CONFIG_ALARM_SIREN_PARTIAL_INTERVAL);
+    };
+  };
+}
+
+static void alarmFlasherAlarmOn() 
+{
+  if (!_flasherActive) {
+    _flasherActive = true;
+    alarmFlasherTimerStart();
+    alarmFlasherChangeMode();
+  };
+}
+
+static void alarmFlasherAlarmOff() 
+{
+  if (_flasherActive) {
+    _flasherActive = false;
+    alarmFlasherTimerStop();
+    alarmFlasherChangeMode();
+  };
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------------ Siren ----------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
@@ -181,6 +372,7 @@ static bool _sirenActive = false;
 static void alarmSirenTimerEnd(void* arg)
 {
   alarmSirenAlarmOff();
+  alarmMqttPublishStatus();
 }
 
 static bool alarmSirenTimerCreate()
@@ -298,172 +490,12 @@ static void alarmSirenChangeMode()
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
-// ------------------------------------------------------ Buzzer ---------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------
-
-static bool _alarmBuzzerEnabled = true;
-
-static void alarmBuzzerChangeMode()
-{
-  if (_alarmBuzzerEnabled) {
-    if (_alarmMode == ASM_DISABLED) {
-      if (_alarmCount > 0) {
-        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
-          CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
-          CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
-      } else {
-        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
-          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
-          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
-      };
-    } else if (_alarmMode == ASM_ARMED) {
-      beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_ARMED_DURATION, 
-        CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
-    } else {
-      beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
-        CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
-    };
-  };
-}
-
-static void alarmBuzzerAlarmOn()
-{
-  if (_alarmBuzzerEnabled) {
-    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
-      CONFIG_ALARM_BUZZER_ALARM_DURATION, 
-      CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
-  };
-}
-
-// -----------------------------------------------------------------------------------------------------------------------
-// ----------------------------------------------------- Flasher ---------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------
-
-ledQueue_t _flasher  = nullptr;
-static uint32_t _flasherDuration = CONFIG_ALARM_DURATION_FLASH;
-static esp_timer_handle_t _flasherTimer = nullptr;
-static bool _flasherActive = false;
-
-static void alarmFlasherTimerEnd(void* arg)
-{
-  alarmFlasherAlarmOff();
-}
-
-static bool alarmFlasherTimerCreate()
-{
-  if (_flasher) {
-    esp_timer_create_args_t flasher_timer_args;
-    memset(&flasher_timer_args, 0, sizeof(esp_timer_create_args_t));
-    flasher_timer_args.callback = &alarmFlasherTimerEnd;
-    flasher_timer_args.name = "timer_flasher";
-    ERR_CHECK(esp_timer_create(&flasher_timer_args, &_flasherTimer), "Failed to create flasher timer");
-    return true;
-  };
-  return false;
-}
-
-static bool alarmFlasherTimerStart()
-{
-  if (_flasherTimer) {
-    if (_flasherDuration > 0) {
-      ERR_CHECK(esp_timer_start_once(_flasherTimer, _flasherDuration * 1000000), "Failed to start flasher timer");
-    } else {
-      if (esp_timer_is_active(_flasherTimer)) {
-        ERR_CHECK(esp_timer_stop(_flasherTimer), "Failed to stop flasher timer");
-      };
-    };
-    return true;
-  };
-  return false;
-}
-
-static bool alarmFlasherTimerStop()
-{
-  if (_flasherTimer && esp_timer_is_active(_flasherTimer)) {
-    ERR_CHECK(esp_timer_stop(_flasherTimer), "Failed to stop flasher timer");
-  };
-  return true;
-}
-
-static void alarmFlasherBlinkOn(uint16_t quantity, uint16_t duration, uint16_t interval)
-{
-  if (quantity > 0) {
-    if (_flasher) {
-      ledTaskSend(_flasher, lmBlinkOn, quantity, duration, interval);
-    };
-    if (_ledAlarm) {
-      ledTaskSend(_ledAlarm, lmBlinkOn, quantity, duration, interval);
-    };
-  } else {
-    if (_flasher) {
-      ledTaskSend(_flasher, lmBlinkOff, 0, 0, 0);
-    };
-    if (_ledAlarm) {
-      ledTaskSend(_ledAlarm, lmBlinkOff, 0, 0, 0);
-    };
-  };
-}
-
-static void alarmFlasherChangeMode()
-{
-  if (_flasherActive) {
-    rlog_d(logTAG, "Flasher activated");
-    // Alarm now
-    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_ON, nullptr, 0, portMAX_DELAY);
-    alarmFlasherBlinkOn(CONFIG_ALARM_ALARM_QUANTITY, CONFIG_ALARM_ALARM_DURATION, CONFIG_ALARM_ALARM_INTERVAL);
-  } else {
-    if (_alarmMode == ASM_DISABLED) {
-      rlog_d(logTAG, "Flasher disabled");
-      // Security is fully enabled
-      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_OFF, nullptr, 0, portMAX_DELAY);
-      alarmFlasherBlinkOn(0, 0, 0);
-    } else if (_alarmMode == ASM_ARMED) {
-      rlog_d(logTAG, "Flasher set fully armed");
-      // Security is active
-      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_BLINK, nullptr, 0, portMAX_DELAY);
-      if (_alarmCount == 0) {
-        // All is calm, all is well
-        alarmFlasherBlinkOn(CONFIG_ALARM_ARMED_QUANTITY, CONFIG_ALARM_ARMED_DURATION, CONFIG_ALARM_ARMED_INTERVAL);
-      } else {
-        // Something happened since the last reset
-        alarmFlasherBlinkOn(CONFIG_ALARM_WARNING_QUANTITY, CONFIG_ALARM_WARNING_DURATION, CONFIG_ALARM_WARNING_INTERVAL);
-      };
-    } else {
-      rlog_d(logTAG, "Flasher set partially armed");
-      // Security partially enabled (perimeter only)
-      eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_BLINK, nullptr, 0, portMAX_DELAY);
-      alarmFlasherBlinkOn(CONFIG_ALARM_PARTIAL_QUANTITY, CONFIG_ALARM_PARTIAL_DURATION, CONFIG_ALARM_PARTIAL_INTERVAL);
-    };
-  };
-}
-
-static void alarmFlasherAlarmOn() 
-{
-  if (!_flasherActive) {
-    _flasherActive = true;
-    alarmFlasherTimerStart();
-    alarmFlasherChangeMode();
-  };
-}
-
-static void alarmFlasherAlarmOff() 
-{
-  if (_flasherActive) {
-    _flasherActive = false;
-    alarmFlasherTimerStop();
-    alarmFlasherChangeMode();
-  };
-}
-
-// -----------------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------- Initialization ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
 static void alarmWifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
-  alarmModeChange(_alarmMode, ACC_STORED, nullptr, true);
+  alarmModeChange(_alarmMode, ACC_STORED, nullptr, true, true);
   eventHandlerUnregister(RE_WIFI_EVENTS, RE_WIFI_STA_PING_OK, alarmWifiEventHandler);
 }
 
@@ -472,7 +504,7 @@ static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int3
   if (*(uint32_t*)event_data == (uint32_t)&_alarmMode) {
     rlog_v(logTAG, "Security mode changed via MQTT, event_id=%d", event_id);
     if (event_id == RE_PARAMS_CHANGED)  {
-      alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true);
+      alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true, true);
     };
   };
 }
@@ -507,6 +539,8 @@ static bool alarmParamsRegister()
 extern bool alarmSystemInit(cb_alarm_change_mode_t cb_mode)
 {
   _alarmOnChangeMode = cb_mode;
+
+  gpio_install_isr_service(0);
 
   return alarmSirenTimerCreate() 
       && alarmFlasherTimerCreate() 
@@ -554,6 +588,9 @@ alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_con
     if (item) {
       item->name = name;
       item->topic = topic;
+      item->status = 0;
+      item->last_set = 0;
+      item->last_clr = 0;
       item->relay_ctrl = cb_relay_ctrl;
       item->relay_state = false;
       for (size_t i = 0; i < ASM_MAX; i++) {
@@ -565,69 +602,6 @@ alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_con
     };
   };
   return nullptr;
-}
-
-// -----------------------------------------------------------------------------------------------------------------------
-// ------------------------------------------------------ MQTT -----------------------------------------------------------
-// -----------------------------------------------------------------------------------------------------------------------
-
-static const char* alarmMqttEventTopic(alarm_event_t type)
-{
-  switch (type) {
-    case ASE_TAMPER:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_TAMPER;
-    case ASE_POWER_ON:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_POWER_ON;
-    case ASE_POWER_OFF:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_POWER_OFF;
-    case ASE_LOW_BATTERY:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_BATTERY;
-    case ASE_CTRL_OFF:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OFF;
-    case ASE_CTRL_ON:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_ON;
-    case ASE_CTRL_PERIMETER:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_PERIMETER;
-    case ASE_CTRL_OUTBUILDINGS:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OUTBUILDINGS;
-    default:
-      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_ALARM;
-  };
-}
-
-static void alarmMqttPublishEvent(alarmEventData_t event_data)
-{
-  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
-    char* topicSensor = nullptr;
-    #if CONFIG_ALARM_MQTT_DEVICE
-      topicSensor = mqttGetTopicDevice4(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
-        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
-        alarmMqttEventTopic(event_data.event->type)); 
-    #else
-      topicSensor = mqttGetTopicSpecial3(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
-        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
-        alarmMqttEventTopic(event_data.event->type)); 
-    #endif // CONFIG_ALARM_MQTT_DEVICE
-
-    if (topicSensor) {
-      mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_STATUS), 
-        malloc_stringf("%d", event_data.event->state), 
-        CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, true, true, true);
-
-      char* ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
-      if (ts) {
-        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_JSON), 
-          malloc_stringf("{\"status\":%d,\"time\":\"%s\",\"unixtime\":%d,\"count\":%d}", 
-            event_data.event->state, ts, event_data.event->event_last, event_data.event->events_count), 
-          CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, true, true, true);
-        free(ts);
-      };
-      
-      free(topicSensor);
-    } else {
-      rlog_e(logTAG, "Failed to generate a topic for publishing an event \"%s\"", event_data.event->message);
-    }
-  };
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -712,12 +686,25 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     rlog_d(logTAG, "Alarm signal for sensor: [ %s ], zone: [ %s ], type: [ %d ]", 
       event_data.sensor->name, event_data.event->zone->name, event_data.event->type);
  
+    // Fix event status
     responses = event_data.event->zone->resp_set[_alarmMode];
     event_data.event->event_last = time(nullptr);
     event_data.event->events_count++;
     event_data.event->state = true;
-    if ((_alarmMode != ASM_DISABLED) && (responses & ASR_COUNT_INC) && (_alarmCount < UINT32_MAX)) {
+
+    // Fix zone status
+    event_data.event->zone->last_set = event_data.event->event_last;
+    if (event_data.event->zone->status < UINT16_MAX) {
+      event_data.event->zone->status++;
+    };
+
+    // Fix total status
+    if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
       _alarmCount++;
+      _alarmLast = event_data.event->event_last;
+    };
+    if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
+      _alarmCount--;
     };
 
     eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_SIGNAL_SET, &event_data, sizeof(alarmEventData_t), portMAX_DELAY);
@@ -729,10 +716,24 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     rlog_d(logTAG, "Clear signal for sensor: [ %s ], zone: [ %s ], type: [ %d ]", 
       event_data.sensor->name, event_data.event->zone->name, event_data.event->type);
 
+    // Fix event status
     responses = event_data.event->zone->resp_clr[_alarmMode];
     event_data.event->state = false;
 
-    if ((_alarmMode != ASM_DISABLED) && (responses & ASR_COUNT_DEC) && (_alarmCount > 0)) {
+    // Fix zone status
+    if (event_data.event->zone->status > 0) {
+      event_data.event->zone->status--;
+    };
+    if (event_data.event->zone->status == 0) {
+      event_data.event->zone->last_clr = time(nullptr);
+    };
+
+    // Fix total status
+    if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
+      _alarmCount++;
+      _alarmLast = event_data.event->event_last;
+    };
+    if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
       _alarmCount--;
     };
 
@@ -745,25 +746,27 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   };
 
   // Handling arming switch events
-  if (event_data.event->type == ASE_CTRL_OFF) {
-    // If the alarm is currently on, then first we just reset the alarm
-    if (_sirenActive || _flasherActive) {
-      alarmSirenAlarmOff();
-      alarmFlasherAlarmOff();
-      #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-        tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-          CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
-          alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
-      #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-    } else {
-      alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false);
+  if (state) {
+    if (event_data.event->type == ASE_CTRL_OFF) {
+      // If the alarm is currently on, then first we just reset the alarm
+      if (_sirenActive || _flasherActive) {
+        alarmSirenAlarmOff();
+        alarmFlasherAlarmOff();
+        #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+            CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
+            alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
+        #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+      } else {
+        alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
+      };
+    } else if (event_data.event->type == ASE_CTRL_ON) {
+      alarmModeChange(ASM_ARMED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
+    } else if (event_data.event->type == ASE_CTRL_PERIMETER) {
+      alarmModeChange(ASM_PERIMETER, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
+    } else if (event_data.event->type == ASE_CTRL_OUTBUILDINGS) {
+      alarmModeChange(ASM_OUTBUILDINGS, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
     };
-  } else if (event_data.event->type == ASE_CTRL_ON) {
-    alarmModeChange(ASM_ARMED, alarmResponsesSource(event_data), event_data.sensor->name, false);
-  } else if (event_data.event->type == ASE_CTRL_PERIMETER) {
-    alarmModeChange(ASM_PERIMETER, alarmResponsesSource(event_data), event_data.sensor->name, false);
-  } else if (event_data.event->type == ASE_CTRL_OUTBUILDINGS) {
-    alarmModeChange(ASM_OUTBUILDINGS, alarmResponsesSource(event_data), event_data.sensor->name, false);
   };
 
   // Posting event on MQTT
@@ -772,23 +775,15 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   };
   
   // Sound and visual notification
-  if (responses & ASR_SIREN) {
-    if (state) {
-      alarmSirenAlarmOn();
-    } else {
-      alarmSirenAlarmOff();
-    };
-  };
-  if (responses & ASR_FLASHER) {
-    if (state) {
-      alarmFlasherAlarmOn();
-    } else {
-      alarmFlasherAlarmOff();
-    };
-  };
-  if (responses & ASR_BUZZER) {
-    if (state) {
+  if (state) {
+    if (responses & ASR_BUZZER) {
       alarmBuzzerAlarmOn();
+    };
+    if (responses & ASR_SIREN) {
+      alarmSirenAlarmOn();
+    };
+    if (responses & ASR_FLASHER) {
+      alarmFlasherAlarmOn();
     };
   };
 
@@ -812,26 +807,28 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
   };
 
-  // Posting status on MQTT
-  if (responses & ASR_MQTT_STATUS) {
-  };
-
   // Sending notifications
   if (responses & ASR_TELEGRAM) {
     #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
-      char* ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
-      if (event_data.event->message && ts) {
-        tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
-          CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
-            event_data.event->message, 
-            event_data.sensor->name, event_data.event->zone->name,
-            alarmModeText(_alarmMode), 
-            _sirenActive ? CONFIG_ALARM_SIREN_ENABLED : CONFIG_ALARM_SIREN_DISABLED,
-            ts, event_data.event->events_count);
-        free(ts);
+      const char* msg_header = state ? event_data.event->msg_set : event_data.event->msg_clr;
+      if (msg_header) {
+        char* msg_ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
+        if (msg_ts) {
+          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
+            CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
+              msg_header, 
+              event_data.sensor->name, event_data.event->zone->name,
+              alarmModeText(_alarmMode), 
+              _sirenActive ? CONFIG_ALARM_SIREN_ENABLED : CONFIG_ALARM_SIREN_DISABLED,
+              msg_ts, event_data.event->events_count);
+          free(msg_ts);
+        };
       };
     #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
   };
+
+  // Publish status on MQTT broker
+  alarmMqttPublishStatus();
 }
 
 static void alarmResponsesUpdateTimeout(alarmEventData_t event_data)
@@ -892,9 +889,10 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
       for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
         item->events[i].zone = nullptr;
         item->events[i].type = ASE_EMPTY;
-        item->events[i].message = nullptr;
         item->events[i].value_set = 0;
+        item->events[i].msg_set = nullptr;
         item->events[i].value_clr = 0;
+        item->events[i].msg_clr = nullptr;
         item->events[i].threshold = 0;
         item->events[i].timeout_clr = 0;
         item->events[i].events_count = 0;
@@ -921,20 +919,84 @@ static void alarmSensorsReset()
   };
 }
 
+static void IRAM_ATTR alarmSensorsIsrHandler(void* arg)
+{
+  alarmSensorHandle_t sensor = (alarmSensorHandle_t)arg;
+  gpio_num_t gpio = (gpio_num_t)sensor->address;
+
+  reciever_data_t data;
+  data.source = RTM_WIRED;
+  data.address = sensor->address;
+  data.value = gpio_get_level(gpio); 
+  data.count = 1;
+
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  xQueueSendFromISR(_alarmQueue, &data, &xHigherPriorityTaskWoken);
+  if (xHigherPriorityTaskWoken) {
+    portYIELD_FROM_ISR();
+  };
+}
+
+bool alarmSensorsWiredInit(alarmSensorHandle_t sensor)
+{
+  if (sensor && sensor->type == AST_WIRED) {
+    gpio_num_t gpio = (gpio_num_t)sensor->address;
+    gpio_pad_select_gpio(gpio);
+    ERR_CHECK(gpio_set_direction(gpio, GPIO_MODE_INPUT), ERR_GPIO_SET_MODE);
+    ERR_CHECK(gpio_set_pull_mode(gpio, GPIO_FLOATING), ERR_GPIO_SET_MODE);
+    ERR_CHECK(gpio_set_intr_type(gpio, GPIO_INTR_ANYEDGE), ERR_GPIO_SET_ISR);
+    ERR_CHECK(gpio_isr_handler_add(gpio, alarmSensorsIsrHandler, sensor), ERR_GPIO_SET_ISR);
+    return true;
+  };
+  return false;
+}
+
+bool alarmSensorsWiredStart(alarmSensorHandle_t sensor)
+{
+  if (sensor && _alarmQueue && sensor->type == AST_WIRED) {
+    gpio_num_t gpio = (gpio_num_t)sensor->address;
+    esp_err_t err = gpio_intr_enable(gpio);
+    if (err == ESP_OK) {
+      rlog_i(logTAG, "Interrupt handler for GPIO %d started", gpio);
+      return true;
+    } else {
+      rlog_e(logTAG, "Failed to start interrupt handler for GPIO %d", gpio);
+    };
+  };
+  return false;
+}
+
+bool alarmSensorsWiredStop(alarmSensorHandle_t sensor)
+{
+  if (sensor && sensor->type == AST_WIRED) {
+    gpio_num_t gpio = (gpio_num_t)sensor->address;
+    esp_err_t err = gpio_intr_disable(gpio);
+    if (err == ESP_OK) {
+      rlog_i(logTAG, "Interrupt handler for GPIO %d stopped", gpio);
+      return true;
+    } else {
+      rlog_e(logTAG, "Failed to stop interrupt handler for GPIO %d", gpio);
+    };
+  };
+  return false;
+}
+
 // -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------- Sensor events -------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, const char* message, 
-  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout_clr)
+void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
+  uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
+  uint16_t threshold, uint32_t timeout_clr)
 {
   if ((sensor) && (zone) && (index<CONFIG_ALARM_MAX_EVENTS)) {
     sensor->events[index].zone = zone;
     sensor->events[index].type = type;
-    sensor->events[index].message = message;
     sensor->events[index].state = false;
     sensor->events[index].value_set = value_set;
+    sensor->events[index].msg_set = message_set;
     sensor->events[index].value_clr = value_clear;
+    sensor->events[index].msg_clr = message_clr;
     sensor->events[index].threshold = threshold;
     sensor->events[index].timeout_clr = timeout_clr;
     sensor->events[index].events_count = 0;
@@ -985,7 +1047,7 @@ static bool alarmEventCheckValueClr(const reciever_data_t data, alarm_sensor_typ
 static bool alarmProcessIncomingData(const reciever_data_t data, bool processed, bool end_of_packet)
 {
   // Log
-  rlog_w(logTAG, "Incoming message:: source: %d, protocol: %d, count: %d, value: 0x%.8X / %d, address: %.8X, command: %02X", 
+  rlog_w(logTAG, "Incoming message:: source: %d, gpio: %d, count: %d, value: 0x%.8X / %d, address: %.8X, command: %02X", 
     data.source, data.address, data.count, data.value, data.value, data.value >> 4, data.value & 0x0f);
 
   // Scanning the entire list of sensors
@@ -1000,8 +1062,8 @@ static bool alarmProcessIncomingData(const reciever_data_t data, bool processed,
           if (alarmEventCheckValueSet(data, sensor->type, &sensor->events[i])) {
             if (data.count >= sensor->events[i].threshold) {
               alarmEventData_t event_data = {sensor, &sensor->events[i]};
-              if (processed && sensor->events[i].timer_clr) {
-                if ((sensor->events[i].type == ASE_ALARM) || (sensor->events[i].type == ASE_TAMPER)) {
+              if (processed) {
+                if (sensor->events[i].timer_clr && ((sensor->events[i].type == ASE_ALARM) || (sensor->events[i].type == ASE_TAMPER))) {
                   alarmResponsesUpdateTimeout(event_data);
                 };
               } else {
@@ -1047,6 +1109,152 @@ static bool alarmProcessIncomingData(const reciever_data_t data, bool processed,
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------ MQTT -----------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+static const char* alarmMqttEventTopic(alarm_event_t type)
+{
+  switch (type) {
+    case ASE_TAMPER:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_TAMPER;
+    case ASE_POWER:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_POWER;
+    case ASE_LOW_BATTERY:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_BATTERY;
+    case ASE_CTRL_OFF:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OFF;
+    case ASE_CTRL_ON:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_ON;
+    case ASE_CTRL_PERIMETER:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_PERIMETER;
+    case ASE_CTRL_OUTBUILDINGS:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_CONTROL_OUTBUILDINGS;
+    default:
+      return CONFIG_ALARM_MQTT_TOPIC_EVENTS_ASE_ALARM;
+  };
+}
+
+static void alarmMqttPublishEvent(alarmEventData_t event_data)
+{
+  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
+    char* topicSensor = nullptr;
+    #if CONFIG_ALARM_MQTT_DEVICE_EVENTS
+      topicSensor = mqttGetTopicDevice4(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+        alarmMqttEventTopic(event_data.event->type)); 
+    #else
+      topicSensor = mqttGetTopicSpecial3(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_EVENTS_LOCAL,
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_ROOT, event_data.event->zone->topic, event_data.sensor->topic, 
+        alarmMqttEventTopic(event_data.event->type)); 
+    #endif // CONFIG_ALARM_MQTT_DEVICE_EVENTS
+
+    if (topicSensor) {
+      mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_STATUS), 
+        malloc_stringf("%d", event_data.event->state), 
+        CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, true, true, true);
+
+      char* ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
+      if (ts) {
+        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_TOPIC_EVENTS_JSON), 
+          malloc_stringf("{\"status\":%d,\"time\":\"%s\",\"unixtime\":%d,\"count\":%d}", 
+            event_data.event->state, ts, event_data.event->event_last, event_data.event->events_count), 
+          CONFIG_ALARM_MQTT_TOPIC_EVENTS_QOS, CONFIG_ALARM_MQTT_TOPIC_EVENTS_RETAINED, false, true, true);
+        free(ts);
+      };
+      
+      free(topicSensor);
+    } else {
+      rlog_e(logTAG, "Failed to generate a topic for publishing an event \"%s\"", event_data.event->msg_set);
+    }
+  };
+}
+
+static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
+{
+  char* ret = nullptr;
+  char* lstSet = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_set);
+  char* lstClr = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_clr);
+  if (lstSet && lstSet) {
+    ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
+      zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
+  };
+  if (lstSet) free(lstSet);
+  if (lstClr) free(lstClr);
+  return ret;
+}
+
+static void alarmMqttPublishStatus()
+{
+  if (statesMqttIsConnected()) {
+    char * topicStatus = nullptr;
+
+    #if CONFIG_ALARM_MQTT_DEVICE_STATUS
+      #ifdef CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+        topicStatus = mqttGetTopicSpecial2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
+          CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE, CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS); 
+      #else 
+        topicStatus = mqttGetTopicSpecial1(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
+          CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE, CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT); 
+      #endif // CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+    #else
+      #ifdef CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+        topicStatus = mqttGetTopicSpecial2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
+          CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS, CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE); 
+      #else 
+        topicStatus = mqttGetTopicSpecial1(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_TOPIC_STATUS_LOCAL,
+          CONFIG_ALARM_MQTT_TOPIC_STATUS_ROOT, CONFIG_ALARM_MQTT_TOPIC_STATUS_STATUS); 
+      #endif // CONFIG_ALARM_MQTT_TOPIC_STATUS_DEVICE
+    #endif // CONFIG_ALARM_MQTT_DEVICE_STATUS
+
+    if (topicStatus) {
+      char * jsonStatus = nullptr;
+      char * jsonZones = nullptr;
+      char * jsonZone = nullptr;
+      char * jsonTemp = nullptr;
+  
+      char* lastTS = malloc_timestr_empty(CONFIG_FORMAT_DTS, _alarmLast);
+
+      alarmZoneHandle_t zone;
+      STAILQ_FOREACH(zone, alarmZones, next) {
+        jsonZone = alarmMqttJsonZone(zone);
+        if (jsonZone) {
+          if (jsonZones) {
+            jsonTemp = jsonZones;
+            jsonZones = malloc_stringf("%s,%s", jsonTemp, jsonZone);
+            free(jsonTemp);
+          } else {
+            jsonZones = malloc_string(jsonZone);
+          };
+          free(jsonZone);
+        };
+      };
+
+      if (lastTS) {
+        if (jsonZones) {
+          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"alarms_display\":\"%d\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
+            _alarmMode, _alarmCount, lastTS, _alarmLast, _alarmCount, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
+          free(jsonZones);
+          free(lastTS);
+        } else {
+          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"alarms_display\":\"%d\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
+            _alarmMode, _alarmCount, lastTS, _alarmLast, _alarmCount, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
+          free(lastTS);
+        };
+      };
+      
+      if (jsonStatus) {
+        mqttPublish(topicStatus, jsonStatus, 
+          CONFIG_ALARM_MQTT_TOPIC_STATUS_QOS, CONFIG_ALARM_MQTT_TOPIC_STATUS_RETAINED, false, true, true);
+      } else {
+        free(topicStatus);
+      };
+    } else {
+      rlog_e(logTAG, "Failed to generate a topic for publishing an alarm status!");
+    };
+  };
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
 // -------------------------------------------------- Task function ------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
@@ -1063,11 +1271,11 @@ static void alarmTaskExec(void *pvParameters)
         ledTaskSend(_ledRx433, lmFlash, CONFIG_ALARM_INCOMING_QUANTITY, CONFIG_ALARM_INCOMING_DURATION, CONFIG_ALARM_INCOMING_INTERVAL);
       };
 
-      // Process received signal RX433
-      if (data.source == RTM_RX433) {
+      // Handling repeating signals (RX433, ISR)
+      if ((data.source == RTM_WIRED) || (data.source == RTM_RX433)) {
         if ((data.source == last.source) && (data.address == last.address) && (data.value == last.value)) {
           last.count++;
-          if (!signal_processed && (last.count == CONFIG_ALARM_THRESHOLD_RF)) {
+          if (!signal_processed && (last.count >= (data.source == RTM_WIRED ? CONFIG_ALARM_THRESHOLD_ISR : CONFIG_ALARM_THRESHOLD_RF))) {
             signal_processed = alarmProcessIncomingData(last, signal_processed, false);
           };
         } else {
@@ -1080,10 +1288,19 @@ static void alarmTaskExec(void *pvParameters)
           last.count = 1;
           signal_processed = false;
         };
+      // Handling non-repeating signals
+      } else {
+
       };
 
-      // Waiting for the next signal %CONFIG_ALARM_TIMEOUT_RF% ms
-      queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_RF);
+      // Waiting for the next signal
+      if (data.source == RTM_WIRED) {
+        queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_ISR);
+      } else if (data.source == RTM_RX433) {
+        queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_RF);
+      } else {
+        queueWait = portMAX_DELAY;;
+      };
     } else {
       // End of transmission, push the previous signal for further processing
       if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0)) {

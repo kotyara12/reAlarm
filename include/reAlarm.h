@@ -30,8 +30,8 @@
  * 
  * Реакция на события задается битовыми флагами для каждого режима работы
  * */
-static const uint16_t ASR_COUNT_INC    = BIT0;  // Увеличить счетчик тревог
-static const uint16_t ASR_COUNT_DEC    = BIT1;  // Уменьшить счетчик тревог
+static const uint16_t ASR_ALARM_INC    = BIT0;  // Увеличить счетчик тревог
+static const uint16_t ASR_ALARM_DEC    = BIT1;  // Уменьшить счетчик тревог
 static const uint16_t ASR_MQTT_EVENT   = BIT2;  // Публикация события на MQTT
 static const uint16_t ASR_MQTT_STATUS  = BIT3;  // Публикация состояния охраны на MQTT
 static const uint16_t ASR_TELEGRAM     = BIT4;  // Уведомление в Telegram
@@ -43,12 +43,14 @@ static const uint16_t ASR_RELAY_OFF    = BIT9;  // Выключить реле (
 static const uint16_t ASR_RELAY_SWITCH = BIT10;  // Переключить реле (нагрузку)
 
 // "Стандартные" наборы реакций
-static const uint16_t ASRS_NONE        = 0x0000; // Никакой реакции (по умолчанию)
-static const uint16_t ASRS_CONTROL     = ASR_MQTT_EVENT;
-static const uint16_t ASRS_REGISTER    = ASR_COUNT_INC | ASR_MQTT_EVENT;
-static const uint16_t ASRS_NOTIFY      = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER;
-static const uint16_t ASRS_SILENT      = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
-static const uint16_t ASRS_ALARM       = ASR_COUNT_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_SIREN | ASR_FLASHER;
+static const uint16_t ASRS_NONE         = 0x0000; // Никакой реакции (по умолчанию)
+static const uint16_t ASRS_CONTROL      = ASR_MQTT_EVENT | ASR_MQTT_STATUS;
+static const uint16_t ASRS_REGISTER     = ASR_MQTT_EVENT | ASR_MQTT_STATUS;
+static const uint16_t ASRS_ALARM_NOTIFY = ASR_ALARM_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER;
+static const uint16_t ASRS_ALARM_SILENT = ASR_ALARM_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
+static const uint16_t ASRS_ALARM_SIREN  = ASR_ALARM_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_SIREN | ASR_FLASHER;
+static const uint16_t ASRS_POWER_ON     = ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_FLASHER;
+static const uint16_t ASRS_POWER_OFF    = ASR_ALARM_INC | ASR_MQTT_EVENT | ASR_MQTT_STATUS | ASR_TELEGRAM | ASR_BUZZER | ASR_FLASHER;
 
 /**
  * ТИП ДАТЧИКА
@@ -98,8 +100,7 @@ typedef enum {
   ASE_EMPTY = 0,          // Не обрабатывается
   ASE_ALARM,              // Сигнал тревоги
   ASE_TAMPER,             // Попытка вскрытия датчика
-  ASE_POWER_ON,           // Питание восстановлено
-  ASE_POWER_OFF,          // Питание отсутствует
+  ASE_POWER,              // Состояние электропитания
   ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
   ASE_CTRL_OFF,           // Пульт: режим охраны отключен
   ASE_CTRL_ON,            // Пульт: режим охраны включен
@@ -140,6 +141,9 @@ typedef struct alarmZone_t {
   const char* name;
   const char* topic;
   cb_relay_control_t relay_ctrl = nullptr;
+  uint16_t status;
+  time_t   last_set;
+  time_t   last_clr;
   bool relay_state = false;
   uint16_t resp_set[ASM_MAX];
   uint16_t resp_clr[ASM_MAX];
@@ -154,10 +158,11 @@ static const uint32_t ALARM_VALUE_NONE = 0xFFFFFFFF;
 typedef struct alarmEvent_t {
   alarmZoneHandle_t zone;
   alarm_event_t type;
-  const char* message;
   bool state;
   uint32_t value_set;
+  const char* msg_set;
   uint32_t value_clr;
+  const char* msg_clr;
   uint16_t threshold;
   uint32_t timeout_clr;
   uint32_t events_count;
@@ -269,20 +274,31 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
 alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address);
 
 /**
+ * Инициализация прерываний для проводних зон
+ * @brief Инициализация обработчиков прерываний для проводних зон
+ * @param sensor Указатель на датчик, созданный alarmSensorAdd()
+ * */
+bool alarmSensorsWiredInit(alarmSensorHandle_t sensor);
+bool alarmSensorsWiredStart(alarmSensorHandle_t sensor);
+bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
+
+/**
  * Добавить событие датчика
  * @brief Установить команду датчика в заданную зону
  * @param sensor Ссылка-указатель на датчик
  * @param zone Ссылка-указатель на зону
  * @param index Порядковый индекс команды от 0 до CONFIG_ALARM_MAX_EVENTS-1 в порядке приоритета
  * @param type Тип события
- * @param message Сообщение для события
  * @param value_set Значение для установки статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
+ * @param message_set Сообщение для события установки статуса тревоги
  * @param value_clear Значение для сброса статуса тревоги. Это может быть команда для беспроводного датчика или логический уровень на входе GPIO. Если 0xFFFFFFFF, то не используется.
+ * @param message_clr Сообщение для события сброса статуса тревоги
  * @param threshold Пороговое значение. Должно придти не менее заданного значения команд подряд в течение timeout. Имеет смысл для беспроводных датчиков, чтобы исключить ложные срабатывания
  * @param timeout_clr Таймаут в миллисекундах. Используется для сброса статуса тревоги после получения последней команды value_set
  * */
-void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type, const char* message, 
-  uint32_t value_set, uint32_t value_clear, uint16_t threshold, uint32_t timeout_clr);
+void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
+  uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
+  uint16_t threshold, uint32_t timeout_clr);
 
 #ifdef __cplusplus
 }
