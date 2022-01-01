@@ -225,6 +225,15 @@ static void alarmBuzzerAlarmOn()
   };
 }
 
+static void alarmBuzzerAlarmOff()
+{
+  if (_alarmBuzzerEnabled) {
+    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_CLEAR_FREQUENCY, 
+      CONFIG_ALARM_BUZZER_ALARM_CLEAR_DURATION, 
+      CONFIG_ALARM_BUZZER_ALARM_CLEAR_QUANTITY);
+  };
+}
+
 // -----------------------------------------------------------------------------------------------------------------------
 // ----------------------------------------------------- Flasher ---------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
@@ -765,6 +774,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
       if (_sirenActive || _flasherActive) {
         alarmSirenAlarmOff();
         alarmFlasherAlarmOff();
+        alarmBuzzerAlarmOff();
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
