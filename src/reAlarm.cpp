@@ -854,18 +854,6 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   alarmMqttPublishStatus();
 }
 
-static void alarmResponsesUpdateTimeout(alarmEventData_t event_data)
-{
-  rlog_d(logTAG, "Update signal for sensor: [ %s ], zone: [ %s ], type: [ %d ]", 
-    event_data.sensor->name, event_data.event->zone->name, event_data.event->type);
-
-  event_data.event->event_last = time(nullptr);
-
-  if (event_data.event->timeout_clr > 0) {
-    alarmResponsesClrTimerCreate(event_data);
-  };
-}
-
 // -----------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------- Sensors ----------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
@@ -950,8 +938,9 @@ static void IRAM_ATTR alarmSensorsIsrHandler(void* arg)
   reciever_data_t data;
   data.source = RTM_WIRED;
   data.address = sensor->address;
-  data.value = gpio_get_level(gpio); 
-  data.count = 1;
+  // data.value = gpio_get_level(gpio); 
+  data.value = 0;
+  data.count = 0;
 
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   xQueueSendFromISR(_alarmQueue, &data, &xHigherPriorityTaskWoken);
@@ -1067,11 +1056,11 @@ static bool alarmEventCheckValueClr(const reciever_data_t data, alarm_sensor_typ
   return false;
 }
 
-static bool alarmProcessIncomingData(const reciever_data_t data, bool processed, bool end_of_packet)
+static bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_packet)
 {
   // Log
-  rlog_w(logTAG, "Incoming message:: source: %d, gpio: %d, count: %d, value: 0x%.8X / %d, address: %.8X, command: %02X", 
-    data.source, data.address, data.count, data.value, data.value, data.value >> 4, data.value & 0x0f);
+  rlog_w(logTAG, "Incoming message:: end of packet: %d, source: %d, gpio: %d, count: %d, value: 0x%.8X / %d, address: %.8X, command: %02X", 
+    end_of_packet, data.source, data.address, data.count, data.value, data.value, data.value >> 4, data.value & 0x0f);
 
   // Scanning the entire list of sensors
   alarmSensorHandle_t item, sensor = nullptr;
@@ -1085,19 +1074,13 @@ static bool alarmProcessIncomingData(const reciever_data_t data, bool processed,
           if (alarmEventCheckValueSet(data, sensor->type, &sensor->events[i])) {
             if (data.count >= sensor->events[i].threshold) {
               alarmEventData_t event_data = {sensor, &sensor->events[i]};
-              if (processed) {
-                if (sensor->events[i].timer_clr && ((sensor->events[i].type == ASE_ALARM) || (sensor->events[i].type == ASE_TAMPER))) {
-                  alarmResponsesUpdateTimeout(event_data);
-                };
-              } else {
-                alarmResponsesProcess(true, event_data);
-              };
+              alarmResponsesProcess(true, event_data);
               return true;
             } else {
               return false;
             };
           } else if (alarmEventCheckValueClr(data, sensor->type, &sensor->events[i])) {
-            if (!processed && (data.count >= sensor->events[i].threshold)) {
+            if (data.count >= sensor->events[i].threshold) {
               alarmEventData_t event_data = {sensor, &sensor->events[i]};
               alarmResponsesProcess(false, event_data);
               return true;
@@ -1110,7 +1093,7 @@ static bool alarmProcessIncomingData(const reciever_data_t data, bool processed,
     };
   };
 
-  if (!processed && end_of_packet && (data.value > 0xffff)) {
+  if (end_of_packet && (data.value > 0xffff)) {
     if (sensor) {
       // Sensor found, but no command defined
       rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data.value, sensor->name);
@@ -1289,10 +1272,11 @@ static void alarmMqttPublishStatus()
 
 static void alarmTaskExec(void *pvParameters)
 {
-  static reciever_data_t data;
-  static reciever_data_t last = {RTM_NONE, 0, 0, 0};
+  static reciever_data_t data, last;
   static bool signal_processed = false;
   static TickType_t queueWait = portMAX_DELAY;
+
+  memset(&last, 0, sizeof(reciever_data_t));
   while (1) {
     if (xQueueReceive(_alarmQueue, &data, queueWait) == pdPASS) {
       // Send signal to LED
@@ -1300,47 +1284,92 @@ static void alarmTaskExec(void *pvParameters)
         ledTaskSend(_ledRx433, lmFlash, CONFIG_ALARM_INCOMING_QUANTITY, CONFIG_ALARM_INCOMING_DURATION, CONFIG_ALARM_INCOMING_INTERVAL);
       };
 
-      // Handling repeating signals (RX433, ISR)
-      if ((data.source == RTM_WIRED) || (data.source == RTM_RX433)) {
-        if ((data.source == last.source) && (data.address == last.address) && (data.value == last.value)) {
+      // Handling signals from ISR
+      if (data.source == RTM_WIRED) {
+        // Due to contact bounce, hundreds of switches can come in, you must definitely wait for the package to complete
+        if ((data.source == last.source) && (data.address == last.address)) {
           last.count++;
-          if (!signal_processed && (last.count >= (data.source == RTM_WIRED ? CONFIG_ALARM_THRESHOLD_ISR : CONFIG_ALARM_THRESHOLD_RF))) {
-            signal_processed = alarmProcessIncomingData(last, signal_processed, false);
+        } else {
+          // Push the previous signal for further processing
+          if ((last.source > RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
+            rlog_d(logTAG, "Process signal (last not processed): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+            alarmProcessIncomingData(last, true);
+          };
+          // Set new data to last and reset the counter (we don't really need it), instead we will count the number of packets
+          memcpy(&last, &data, sizeof(reciever_data_t));
+          last.count = 1;
+          signal_processed = false;
+          rlog_d(logTAG, "Init last signal: source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+        };
+
+        // Waiting for the next signal
+        queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_ISR);
+      }
+      
+      // Handling packets from RX433
+      else if (data.source == RTM_RX433) {
+        if ((data.source == last.source) && (data.address == last.address) && (data.value == last.value)) {
+          // One more signal from the packet
+          last.count++;
+          // If the number of signals has exceeded the threshold, process the signal
+          if (!signal_processed && (last.count >= CONFIG_ALARM_THRESHOLD_RF)) {
+            rlog_d(logTAG, "Process signal (exceeded threshold): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+            signal_processed = alarmProcessIncomingData(last, false);
           };
         } else {
           // Push the previous signal for further processing
-          if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
-            alarmProcessIncomingData(last, signal_processed, true);
+          if ((last.source > RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
+            rlog_d(logTAG, "Process signal (last not processed): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+            alarmProcessIncomingData(last, true);
           };
           // Set new data to last and reset the counter (we don't really need it), instead we will count the number of packets
-          last = data;
+          memcpy(&last, &data, sizeof(reciever_data_t));
           last.count = 1;
           signal_processed = false;
+          rlog_d(logTAG, "Init last signal: source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+          // If the threshold is not set, process the signal immediately
+          if (!signal_processed && (last.count >= CONFIG_ALARM_THRESHOLD_RF)) {
+            rlog_d(logTAG, "Process signal (no threshold): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+            signal_processed = alarmProcessIncomingData(last, false);
+          };
         };
-      // Handling non-repeating signals
-      } else {
-
-      };
-
-      // Waiting for the next signal
-      if (data.source == RTM_WIRED) {
-        queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_ISR);
-      } else if (data.source == RTM_RX433) {
+        
+        // Waiting for the next signal
         queueWait = pdMS_TO_TICKS(CONFIG_ALARM_TIMEOUT_RF);
+
+      // Handling non-repeating signals
+      } else if (data.source > RTM_NONE) {
+        memcpy(&last, &data, sizeof(reciever_data_t));
+        last.count = 1;
+        rlog_d(logTAG, "Process signal (non-repeating): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+        alarmProcessIncomingData(last, true);
+        
+        // Waiting for the next signal forever
+        signal_processed = false;
+        memset(&last, 0, sizeof(reciever_data_t));
+        queueWait = portMAX_DELAY;
+
+      // What was it?
       } else {
-        queueWait = portMAX_DELAY;;
+        rlog_e(logTAG, "Signal received from RTM_NONE!");
+        signal_processed = false;
+        memset(&last, 0, sizeof(reciever_data_t));
+        queueWait = portMAX_DELAY;
       };
     } else {
       // End of transmission, push the previous signal for further processing
-      if ((last.source != RTM_NONE) && (last.address > 0) && (last.count > 0)) {
-        alarmProcessIncomingData(last, signal_processed, true);
+      if ((last.source > RTM_NONE) && (last.address > 0) && (last.count > 0) && !signal_processed) {
+        // For GPIO, you need to update the current value, since the data received from the ISR is very unreliable
+        if (last.source == RTM_WIRED) {
+          last.value = gpio_get_level((gpio_num_t)last.address);
+        };
+        rlog_d(logTAG, "Process signal (end of transmission): source=%d, address=%d, value=%d, count=%d", last.source, last.address, last.value, last.count);
+        alarmProcessIncomingData(last, true);
       };
 
-      // Clear buffer
-      memset(&last, 0, sizeof(reciever_data_t));
+      // Waiting for the next signal forever
       signal_processed = false;
-
-      // Wait for the next signal forever
+      memset(&last, 0, sizeof(reciever_data_t));
       queueWait = portMAX_DELAY;
     };
   };
