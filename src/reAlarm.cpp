@@ -53,8 +53,10 @@ static alarm_mode_t _alarmMode = ASM_DISABLED;
 static paramsEntryHandle_t _alarmParamMode = nullptr;
 static cb_alarm_change_mode_t _alarmOnChangeMode = nullptr;
 static uint32_t _alarmCount = 0;
-static time_t _alarmLast = 0;
-static alarmEventData_t _alarmLastEvent = {nullptr, nullptr};
+static time_t _alarmLastEvent = 0;
+static time_t _alarmLastAlarm = 0;
+static alarmEventData_t _alarmLastEventData = {nullptr, nullptr};
+static alarmEventData_t _alarmLastAlarmData = {nullptr, nullptr};
 
 static void alarmSensorsReset();
 static void alarmSirenAlarmOff();
@@ -114,8 +116,8 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     // Reset counters
     if (alarmModeChanged && (newMode != ASM_DISABLED)) {
       _alarmCount = 0;
-      _alarmLast = 0;
-      _alarmLastEvent = {nullptr, nullptr};
+      _alarmLastAlarm = 0;
+      _alarmLastAlarmData = {nullptr, nullptr};
       alarmSensorsReset();
     };
 
@@ -719,10 +721,14 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
 
     // Fix total status
-    if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
-      _alarmCount++;
-      _alarmLast = event_data.event->event_last;
-      _alarmLastEvent = event_data;
+    _alarmLastEvent = event_data.event->event_last;
+    _alarmLastEventData = event_data;
+    if (responses & ASR_ALARM_INC) {
+      if (_alarmCount < UINT32_MAX) {
+        _alarmCount++;
+      };
+      _alarmLastAlarm = event_data.event->event_last;
+      _alarmLastAlarmData = event_data;
     };
     if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
       _alarmCount--;
@@ -750,10 +756,12 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
 
     // Fix total status
-    if ((responses & ASR_ALARM_INC) && (_alarmCount < UINT32_MAX)) {
-      _alarmCount++;
-      _alarmLast = event_data.event->event_last;
-      _alarmLastEvent = event_data;
+    if (responses & ASR_ALARM_INC) {
+      if (_alarmCount < UINT32_MAX) {
+        _alarmCount++;
+      };
+      _alarmLastAlarm = event_data.event->event_last;
+      _alarmLastAlarmData = event_data;
     };
     if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
       _alarmCount--;
@@ -949,13 +957,13 @@ static void IRAM_ATTR alarmSensorsIsrHandler(void* arg)
   };
 }
 
-bool alarmSensorsWiredInit(alarmSensorHandle_t sensor)
+bool alarmSensorsWiredInit(alarmSensorHandle_t sensor, gpio_pull_mode_t pull)
 {
   if (sensor && sensor->type == AST_WIRED) {
     gpio_num_t gpio = (gpio_num_t)sensor->address;
     gpio_pad_select_gpio(gpio);
     ERR_CHECK(gpio_set_direction(gpio, GPIO_MODE_INPUT), ERR_GPIO_SET_MODE);
-    ERR_CHECK(gpio_set_pull_mode(gpio, GPIO_FLOATING), ERR_GPIO_SET_MODE);
+    ERR_CHECK(gpio_set_pull_mode(gpio, pull), ERR_GPIO_SET_MODE);
     ERR_CHECK(gpio_set_intr_type(gpio, GPIO_INTR_ANYEDGE), ERR_GPIO_SET_ISR);
     ERR_CHECK(gpio_isr_handler_add(gpio, alarmSensorsIsrHandler, sensor), ERR_GPIO_SET_ISR);
     return true;
@@ -1218,12 +1226,19 @@ static void alarmMqttPublishStatus()
       char * jsonZone = nullptr;
       char * jsonTemp = nullptr;
   
-      char* lastTS = malloc_timestr_empty(CONFIG_FORMAT_DTS, _alarmLast);
-      const char* lastSensor = nullptr;
-      if (_alarmLastEvent.sensor) {
-        lastSensor = _alarmLastEvent.sensor->name;
+      char* alarmLastTS = malloc_timestr_empty(CONFIG_FORMAT_DTS, _alarmLastAlarm);
+      char* eventLastTS = malloc_timestr_empty(CONFIG_FORMAT_DTS, _alarmLastEvent);
+      const char* alarmLastSensor = nullptr;
+      const char* eventLastSensor = nullptr;
+      if (_alarmLastAlarmData.sensor) {
+        alarmLastSensor = _alarmLastAlarmData.sensor->name;
       } else {
-        lastSensor = "";
+        alarmLastSensor = "";
+      };
+      if (_alarmLastEventData.sensor) {
+        eventLastSensor = _alarmLastEventData.sensor->name;
+      } else {
+        eventLastSensor = "";
       };
 
       alarmZoneHandle_t zone;
@@ -1241,19 +1256,43 @@ static void alarmMqttPublishStatus()
         };
       };
 
-      if (lastTS) {
-        if (jsonZones) {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"last_sensor\":\"%s\",\"alarms_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
-            _alarmMode, _alarmCount, lastTS, _alarmLast, lastSensor, lastSensor, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
-          free(jsonZones);
-          free(lastTS);
-        } else {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"last_alarm\":\"%s\",\"last_unixtime\":%d,\"last_sensor\":\"%s\",\"alarms_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
-            _alarmMode, _alarmCount, lastTS, _alarmLast, lastSensor, lastSensor, lastTS, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
-          free(lastTS);
-        };
+      if (alarmLastTS && eventLastTS) {
+        #if CONFIG_ALARM_MQTT_TOPIC_STATUS_DISPLAY
+          if (jsonZones) {
+            jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"alarm_last\":\"%s\",\"alarm_unixtime\":%d,\"alarm_sensor\":\"%s\",\"alarm_display\":\"%s\n%s\",\"event_last\":\"%s\",\"event_unixtime\":%d,\"event_sensor\":\"%s\",\"event_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
+              _alarmMode, 
+              _alarmCount, alarmLastTS, _alarmLastAlarm, alarmLastSensor, alarmLastSensor, alarmLastTS, 
+              eventLastTS, _alarmLastEvent, eventLastSensor, eventLastSensor, eventLastTS, 
+              _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
+            free(jsonZones);
+          } else {
+            jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"alarm_last\":\"%s\",\"alarm_unixtime\":%d,\"alarm_sensor\":\"%s\",\"alarm_display\":\"%s\n%s\",\"event_last\":\"%s\",\"event_unixtime\":%d,\"event_sensor\":\"%s\",\"event_display\":\"%s\n%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
+              _alarmMode, 
+              _alarmCount, alarmLastTS, _alarmLastAlarm, alarmLastSensor, alarmLastSensor, alarmLastTS, 
+              eventLastTS, _alarmLastEvent, eventLastSensor, eventLastSensor, eventLastTS, 
+              _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
+          };
+        #else
+          if (jsonZones) {
+            jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"alarm_last\":\"%s\",\"alarm_unixtime\":%d,\"alarm_sensor\":\"%s\",\"event_last\":\"%s\",\"event_unixtime\":%d,\"event_sensor\":\"%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{%s}}", 
+              _alarmMode, 
+              _alarmCount, alarmLastTS, _alarmLastAlarm, alarmLastSensor, 
+              eventLastTS, _alarmLastEvent, eventLastSensor, 
+              _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive, jsonZones);
+            free(jsonZones);
+          } else {
+            jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"alarm_last\":\"%s\",\"alarm_unixtime\":%d,\"alarm_sensor\":\"%s\",\"event_last\":\"%s\",\"event_unixtime\":%d,\"event_sensor\":\"%s\",\"siren\":%d,\"flasher\":%d,\"annunciator\":%d,\"zones\":{}}", 
+              _alarmMode, 
+              _alarmCount, alarmLastTS, _alarmLastAlarm, alarmLastSensor, 
+              eventLastTS, _alarmLastEvent, eventLastSensor, 
+              _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
+          };
+        #endif // CONFIG_ALARM_MQTT_TOPIC_STATUS_DISPLAY
       };
       
+      if (alarmLastTS) free(alarmLastTS);
+      if (eventLastTS) free(eventLastTS);
+
       if (jsonStatus) {
         mqttPublish(topicStatus, jsonStatus, 
           CONFIG_ALARM_MQTT_TOPIC_STATUS_QOS, CONFIG_ALARM_MQTT_TOPIC_STATUS_RETAINED, false, true, true);

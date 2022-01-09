@@ -278,7 +278,7 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
  * @brief Инициализация обработчиков прерываний для проводних зон
  * @param sensor Указатель на датчик, созданный alarmSensorAdd()
  * */
-bool alarmSensorsWiredInit(alarmSensorHandle_t sensor);
+bool alarmSensorsWiredInit(alarmSensorHandle_t sensor, gpio_pull_mode_t pull);
 bool alarmSensorsWiredStart(alarmSensorHandle_t sensor);
 bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
 
