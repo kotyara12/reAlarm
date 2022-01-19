@@ -1154,6 +1154,25 @@ static const char* alarmMqttEventTopic(alarm_event_t type)
   };
 }
 
+static char _alarmTimestampL[CONFIG_ALARM_TIMESTAMP_LONG_BUF_SIZE];
+static char _alarmTimestampS[CONFIG_ALARM_TIMESTAMP_SHORT_BUF_SIZE];
+
+static void alarmFormatTimestamps(time_t value)
+{
+  static struct tm timeinfo;
+
+  memset(&_alarmTimestampL, 0, sizeof(_alarmTimestampL));
+  memset(&_alarmTimestampS, 0, sizeof(_alarmTimestampS));
+  if (value > 0) {
+    localtime_r(&value, &timeinfo);
+    strftime(_alarmTimestampL, sizeof(_alarmTimestampL), CONFIG_ALARM_TIMESTAMP_LONG, &timeinfo);
+    strftime(_alarmTimestampS, sizeof(_alarmTimestampS), CONFIG_ALARM_TIMESTAMP_SHORT, &timeinfo);
+  } else {
+    strcpy(_alarmTimestampL, CONFIG_FORMAT_EMPTY_DATETIME);
+    strcpy(_alarmTimestampS, CONFIG_FORMAT_EMPTY_DATETIME);
+  };
+}
+
 static void alarmMqttPublishEvent(alarmEventData_t event_data)
 {
   if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
@@ -1173,16 +1192,11 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
         malloc_stringf("%d", event_data.event->state), 
         CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true, true);
 
-      char* tsLong = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_LONG, event_data.event->event_last);
-      char* tsShort = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_SHORT, event_data.event->event_last);
-      if (tsLong && tsShort) {
-        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
-          malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
-            event_data.event->state, tsLong, tsShort, event_data.event->event_last, event_data.event->events_count), 
-          CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, false, true, true);
-      };
-      if (tsLong) free(tsLong);
-      if (tsShort) free(tsShort);
+      alarmFormatTimestamps(event_data.event->event_last);
+      mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
+        malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
+          event_data.event->state, _alarmTimestampL, _alarmTimestampS, event_data.event->event_last, event_data.event->events_count), 
+        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, false, true, true);
       
       free(topicSensor);
     } else {
@@ -1235,10 +1249,6 @@ static void alarmMqttPublishStatus()
       char * jsonTemp = nullptr;
       char * statusSummary = nullptr;
       char * statusAnnunciator = nullptr;
-      char * tlLastAlarm = nullptr;
-      char * tsLastAlarm = nullptr;
-      char * tlLastEvent = nullptr;
-      char * tsLastEvent = nullptr;
       char * jsonLastAlarm = nullptr;
       char * jsonLastEvent = nullptr;
 
@@ -1310,21 +1320,20 @@ static void alarmMqttPublishStatus()
         goto free_strings_error;
       };
 
-      // Generate timestamps
-      tlLastAlarm = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_LONG, _alarmLastAlarm);
-      tsLastAlarm = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_SHORT, _alarmLastAlarm);
-      tlLastEvent = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_LONG, _alarmLastEvent);
-      tsLastEvent = malloc_timestr_empty(CONFIG_ALARM_TIMESTAMP_SHORT, _alarmLastEvent);
-      if (!(tlLastAlarm && tsLastAlarm && tlLastEvent && tsLastEvent)) {
-        rlog_e(logTAG, "Failed to generate timestamps!");
+      // Generate last event data
+      alarmFormatTimestamps(_alarmLastEvent);
+      jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
+      if (!jsonLastEvent) {
+        rlog_e(logTAG, "Failed to generate information about recent event!");
         goto free_strings_error;
       };
 
+
       // Generate last alarm data
-      jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, tlLastAlarm, tsLastAlarm, _alarmLastAlarm);
-      jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, tlLastEvent, tsLastEvent, _alarmLastEvent);
-      if (!(jsonLastAlarm && jsonLastEvent)) {
-        rlog_e(logTAG, "Failed to generate information about recent events!");
+      alarmFormatTimestamps(_alarmLastAlarm);
+      jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
+      if (!jsonLastAlarm) {
+        rlog_e(logTAG, "Failed to generate information about recent alarm!");
         goto free_strings_error;
       };
 
@@ -1335,14 +1344,14 @@ static void alarmMqttPublishStatus()
             _alarmMode, _alarmCount, 
             statusSummary, statusAnnunciator, 
             jsonLastAlarm, jsonLastEvent, 
-            statusSummary, sensorLastAlarm, tsLastAlarm,          
+            statusSummary, sensorLastAlarm, _alarmTimestampS,          
             jsonZones);
         } else {
           jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"display\":\"%s\n%s\n%s\",\"zones\":{}}", 
             _alarmMode, _alarmCount, 
             statusSummary, statusAnnunciator, 
             jsonLastAlarm, jsonLastEvent, 
-            statusSummary, sensorLastAlarm, tsLastAlarm);
+            statusSummary, sensorLastAlarm, _alarmTimestampS);
         };
       #else
         if (jsonZones) {
@@ -1377,8 +1386,6 @@ static void alarmMqttPublishStatus()
         if (jsonZones) free(jsonZones);
         if (statusSummary) free(statusSummary);
         if (statusAnnunciator) free(statusAnnunciator);
-        if (tsLastAlarm) free(tsLastAlarm);
-        if (tsLastEvent) free(tsLastEvent);
         if (jsonLastAlarm) free(jsonLastAlarm);
         if (jsonLastEvent) free(jsonLastEvent);
     } else {
