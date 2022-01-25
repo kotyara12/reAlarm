@@ -526,6 +526,18 @@ static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int3
   };
 }
 
+static void alarmOtaEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if ((event_id == RE_SYS_OTA) && (event_data)) {
+    re_system_event_data_t* data = (re_system_event_data_t*)event_data;
+    if (data->type == RE_SYS_SET) {
+      alarmTaskSuspend();
+    } else {
+      alarmTaskResume();
+    };
+  };
+}
+
 static bool alarmParamsRegister()
 {
   paramsGroupHandle_t pgSecurity = paramsRegisterGroup(nullptr, 
@@ -566,7 +578,8 @@ extern bool alarmSystemInit(cb_alarm_change_mode_t cb_mode)
 
   return alarmSirenTimerCreate() 
       && alarmFlasherTimerCreate() 
-      && alarmParamsRegister();
+      && alarmParamsRegister()
+      && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_OTA, &alarmOtaEventHandler, nullptr);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
