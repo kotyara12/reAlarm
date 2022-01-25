@@ -1580,6 +1580,7 @@ bool alarmTaskSuspend()
 bool alarmTaskResume()
 {
   if ((_alarmTask) && (eTaskGetState(_alarmTask) == eSuspended)) {
+    vTaskResume(_alarmTask);
     if (eTaskGetState(_alarmTask) != eSuspended) {
       rloga_i("Task [ %s ] has been successfully resumed", alarmTaskName);
       return true;
