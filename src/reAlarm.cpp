@@ -128,9 +128,11 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     };
 
     // One-time siren signal when switching the arming mode
-    alarmSirenChangeMode();
     alarmFlasherChangeMode();
-    alarmBuzzerChangeMode();
+    if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
+      alarmSirenChangeMode();
+      alarmBuzzerChangeMode();
+    };
     
     // Publish current mode and status on MQTT broker
     if (publish_status) {
