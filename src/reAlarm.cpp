@@ -268,13 +268,9 @@ static bool alarmFlasherTimerCreate()
 
 static bool alarmFlasherTimerStart()
 {
-  if (_flasherTimer) {
-    if (_flasherDuration > 0) {
+  if (_flasherTimer && (_flasherDuration > 0)) {
+    if (!esp_timer_is_active(_flasherTimer)) {
       ERR_CHECK(esp_timer_start_once(_flasherTimer, _flasherDuration * 1000000), "Failed to start flasher timer");
-    } else {
-      if (esp_timer_is_active(_flasherTimer)) {
-        ERR_CHECK(esp_timer_stop(_flasherTimer), "Failed to stop flasher timer");
-      };
     };
     return true;
   };
@@ -362,9 +358,8 @@ static void alarmFlasherChangeMode()
 
 static void alarmFlasherAlarmOn() 
 {
-  if (!_flasherActive) {
+  if (!_flasherActive && alarmFlasherTimerStart()) {
     _flasherActive = true;
-    alarmFlasherTimerStart();
     alarmFlasherChangeMode();
   };
 }
@@ -408,13 +403,9 @@ static bool alarmSirenTimerCreate()
 
 static bool alarmSirenTimerStart()
 {
-  if (_sirenTimer) {
-    if (_sirenDuration > 0) {
+  if (_sirenTimer && (_sirenDuration > 0)) {
+    if (!esp_timer_is_active(_sirenTimer)) {
       ERR_CHECK(esp_timer_start_once(_sirenTimer, _sirenDuration * 1000000), "Failed to start siren timer");
-    } else {
-      if (esp_timer_is_active(_sirenTimer)) {
-        ERR_CHECK(esp_timer_stop(_sirenTimer), "Failed to stop siren timer");
-      };
     };
     return true;
   };
@@ -446,9 +437,8 @@ static void alarmSirenSwitch()
 
 static void alarmSirenAlarmOn() 
 {
-  if (!_sirenActive) {
+  if (!_sirenActive && alarmSirenTimerStart()) {
     _sirenActive = true;
-    alarmSirenTimerStart();
     alarmSirenSwitch();
   };
 }
