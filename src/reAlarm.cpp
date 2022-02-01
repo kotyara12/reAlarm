@@ -146,7 +146,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
         rlog_w(logTAG, "Full security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_ARMED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
@@ -156,7 +156,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
         rlog_w(logTAG, "Perimeter security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_PERIMETER, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_PERIMETER, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
@@ -166,7 +166,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
         rlog_w(logTAG, "Outbuildings security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_OUTBUILDINGS, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_OUTBUILDINGS, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
@@ -176,7 +176,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
         rlog_w(logTAG, "Security mode disabled");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_DISABLED, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         break;
@@ -799,7 +799,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
         alarmFlasherAlarmOff();
         alarmBuzzerAlarmOff();
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
             alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
@@ -860,7 +860,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
       if (msg_header) {
         char* msg_ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
         if (msg_ts) {
-          tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
+          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
             CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
               msg_header, 
               event_data.sensor->name, event_data.event->zone->name,
@@ -1127,14 +1127,14 @@ static bool alarmProcessIncomingData(const reciever_data_t data, bool end_of_pac
       // Sensor found, but no command defined
       rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data.value, sensor->name);
       #if CONFIG_TELEGRAM_ENABLE && defined(CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED) && CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED
-        tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_COMMAND_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
+        tgSend(TG_SERVICE, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_COMMAND_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
           CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED_TEMPLATE, sensor->name, data.value, data.value >> 4, data.value & 0x0f);
       #endif // CONFIG_TELEGRAM_ENABLE
     } else {
       // Sensor not found
       rlog_w(logTAG, "Failed to identify event [%d : 0x%.8X]!", data.source, data.value);
       #if CONFIG_TELEGRAM_ENABLE && defined(CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED) && CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED
-        tgSend(CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_SENSOR_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
+        tgSend(TG_SERVICE, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_SENSOR_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
           CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED_TEMPLATE, data.address, data.value, data.value >> 4, data.value & 0x0f);
       #endif // CONFIG_TELEGRAM_ENABLE
     };
