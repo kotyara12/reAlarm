@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "rLog.h"
 #include "rStrings.h"
+#include "reEsp32.h"
 #include "reRx433.h"
 #include "reParams.h"
 #include "reEvents.h"
@@ -534,6 +535,7 @@ static bool alarmParamsRegister()
 {
   paramsGroupHandle_t pgSecurity = paramsRegisterGroup(nullptr, 
     CONFIG_ALARM_PARAMS_ROOT_KEY, CONFIG_ALARM_PARAMS_ROOT_TOPIC, CONFIG_ALARM_PARAMS_ROOT_FRIENDLY);
+  RE_MEM_CHECK(logTAG, pgSecurity, return false);
   
   #if CONFIG_ALARM_MQTT_DEVICE_MODE
     _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
@@ -542,6 +544,7 @@ static bool alarmParamsRegister()
     _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER_LOCATION, OPT_TYPE_U8, nullptr, pgSecurity, 
       CONFIG_ALARM_PARAMS_MODE_KEY, CONFIG_ALARM_PARAMS_MODE_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmMode);
   #endif // CONFIG_ALARM_MQTT_DEVICE_MODE
+  RE_MEM_CHECK(logTAG, _alarmParamMode, return false);
   _alarmParamMode->notify = false;
   paramsSetLimitsU8(_alarmParamMode, (uint8_t)ASM_DISABLED, (uint8_t)ASM_MAX-1);
   eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, alarmMqttEventHandler, nullptr);
@@ -583,14 +586,14 @@ typedef struct alarmZoneHead_t *alarmZoneHeadHandle_t;
 
 static alarmZoneHeadHandle_t alarmZones = nullptr;
 
-void alarmZonesInit()
+bool alarmZonesInit()
 {
   if (!alarmZones) {
-    alarmZones = (alarmZoneHeadHandle_t)calloc(1, sizeof(alarmZoneHead_t));
-    if (alarmZones) {
-      STAILQ_INIT(alarmZones);
-    };
+    alarmZones = (alarmZoneHeadHandle_t)esp_calloc(1, sizeof(alarmZoneHead_t));
+    RE_MEM_CHECK(logTAG, alarmZones, return false);
+    STAILQ_INIT(alarmZones);
   };
+  return true;
 }
 
 void alarmZonesFree()
@@ -602,6 +605,7 @@ void alarmZonesFree()
       free(itemZ);
     };
     free(alarmZones);
+    alarmZones = nullptr;
   };
 }
 
@@ -611,22 +615,21 @@ alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_con
     alarmZonesInit();
   };
   if (alarmZones) {
-    alarmZoneHandle_t item = (alarmZoneHandle_t)calloc(1, sizeof(alarmZone_t));
-    if (item) {
-      item->name = name;
-      item->topic = topic;
-      item->status = 0;
-      item->last_set = 0;
-      item->last_clr = 0;
-      item->relay_ctrl = cb_relay_ctrl;
-      item->relay_state = false;
-      for (size_t i = 0; i < ASM_MAX; i++) {
-        item->resp_set[i] = ASRS_NONE;
-        item->resp_clr[i] = ASRS_NONE;
-      };
-      STAILQ_INSERT_TAIL(alarmZones, item, next);
-      return item;
+    alarmZoneHandle_t item = (alarmZoneHandle_t)esp_calloc(1, sizeof(alarmZone_t));
+    RE_MEM_CHECK(logTAG, item, return nullptr);
+    item->name = name;
+    item->topic = topic;
+    item->status = 0;
+    item->last_set = 0;
+    item->last_clr = 0;
+    item->relay_ctrl = cb_relay_ctrl;
+    item->relay_state = false;
+    for (size_t i = 0; i < ASM_MAX; i++) {
+      item->resp_set[i] = ASRS_NONE;
+      item->resp_clr[i] = ASRS_NONE;
     };
+    STAILQ_INSERT_TAIL(alarmZones, item, next);
+    return item;
   };
   return nullptr;
 }
@@ -664,7 +667,7 @@ static void alarmResponsesClrTimerEnd(void* arg)
   };
 }
 
-static void alarmResponsesClrTimerCreate(alarmEventData_t event_data)
+static bool alarmResponsesClrTimerCreate(alarmEventData_t event_data)
 {
   esp_err_t err = ESP_OK;
   if (event_data.event->timer_clr) {
@@ -672,28 +675,24 @@ static void alarmResponsesClrTimerCreate(alarmEventData_t event_data)
       err = esp_timer_stop(event_data.event->timer_clr);
       if (err != ESP_OK) {
         rlog_e(logTAG, "Failed to stop event timer!");
-        return;
+        return false;
       };
     };
   } else {
-    void* timer_data = (alarmEventData_t*)malloc(sizeof(alarmEventData_t));
-    if (timer_data) {
-      memcpy(timer_data, &event_data, sizeof(alarmEventData_t));
+    void* timer_data = (alarmEventData_t*)esp_malloc(sizeof(alarmEventData_t));
+    RE_MEM_CHECK(logTAG, timer_data, return false);
+    memcpy(timer_data, &event_data, sizeof(alarmEventData_t));
 
-      esp_timer_create_args_t timer_args;
-      memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
-      timer_args.callback = &alarmResponsesClrTimerEnd;
-      timer_args.name = "timer_event";
-      timer_args.arg = timer_data;
+    esp_timer_create_args_t timer_args;
+    memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
+    timer_args.callback = &alarmResponsesClrTimerEnd;
+    timer_args.name = "timer_event";
+    timer_args.arg = timer_data;
 
-      err = esp_timer_create(&timer_args, &event_data.event->timer_clr);
-      if (err != ESP_OK) {
-        rlog_e(logTAG, "Failed to create event timer!");
-        return;
-      };
-    } else {
-      rlog_e(logTAG, "Failed to allocate timer data!");
-      return;
+    err = esp_timer_create(&timer_args, &event_data.event->timer_clr);
+    if (err != ESP_OK) {
+      rlog_e(logTAG, "Failed to create event timer!");
+      return false;
     };
   };
   
@@ -701,9 +700,11 @@ static void alarmResponsesClrTimerCreate(alarmEventData_t event_data)
     err = esp_timer_start_once(event_data.event->timer_clr, 1000 * event_data.event->timeout_clr);
     if (err != ESP_OK) {
       rlog_e(logTAG, "Failed to start event timer");
-      return;
+      return false;
     };
+    return true;
   };
+  return false;
 }
 
 static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
@@ -876,14 +877,14 @@ typedef struct alarmSensorHead_t *alarmSensorHeadHandle_t;
 
 static alarmSensorHeadHandle_t alarmSensors = nullptr;
 
-void alarmSensorsInit()
+bool alarmSensorsInit()
 {
   if (!alarmSensors) {
-    alarmSensors = (alarmSensorHeadHandle_t)calloc(1, sizeof(alarmSensorHead_t));
-    if (alarmSensors) {
-      STAILQ_INIT(alarmSensors);
-    };
+    alarmSensors = (alarmSensorHeadHandle_t)esp_calloc(1, sizeof(alarmSensorHead_t));
+    RE_MEM_CHECK(logTAG, alarmSensors, return false);
+    STAILQ_INIT(alarmSensors);
   };
+  return true;
 }
 
 void alarmSensorsFree()
@@ -904,27 +905,26 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
     alarmSensorsInit();
   };
   if (alarmSensors) {
-    alarmSensorHandle_t item = (alarmSensorHandle_t)calloc(1, sizeof(alarmSensor_t));
-    if (item) {
-      item->name = name;
-      item->topic = topic;
-      item->type = type;
-      item->address = address;
-      for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
-        item->events[i].zone = nullptr;
-        item->events[i].type = ASE_EMPTY;
-        item->events[i].value_set = 0;
-        item->events[i].msg_set = nullptr;
-        item->events[i].value_clr = 0;
-        item->events[i].msg_clr = nullptr;
-        item->events[i].threshold = 0;
-        item->events[i].timeout_clr = 0;
-        item->events[i].events_count = 0;
-        item->events[i].event_last = 0;
-      };
-      STAILQ_INSERT_TAIL(alarmSensors, item, next);
-      return item;
+    alarmSensorHandle_t item = (alarmSensorHandle_t)esp_calloc(1, sizeof(alarmSensor_t));
+    RE_MEM_CHECK(logTAG, item, return nullptr);
+    item->name = name;
+    item->topic = topic;
+    item->type = type;
+    item->address = address;
+    for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
+      item->events[i].zone = nullptr;
+      item->events[i].type = ASE_EMPTY;
+      item->events[i].value_set = 0;
+      item->events[i].msg_set = nullptr;
+      item->events[i].value_clr = 0;
+      item->events[i].msg_clr = nullptr;
+      item->events[i].threshold = 0;
+      item->events[i].timeout_clr = 0;
+      item->events[i].events_count = 0;
+      item->events[i].event_last = 0;
     };
+    STAILQ_INSERT_TAIL(alarmSensors, item, next);
+    return item;
   };
   return nullptr;
 }
@@ -1180,7 +1180,7 @@ static void alarmFormatTimestamps(time_t value)
 
 static void alarmMqttPublishEvent(alarmEventData_t event_data)
 {
-  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsConnected()) {
+  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsEnabled()) {
     char* topicSensor = nullptr;
     #if CONFIG_ALARM_MQTT_DEVICE_EVENTS
       topicSensor = mqttGetTopicDevice5(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_EVENTS_LOCAL,
@@ -1213,12 +1213,15 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
 static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
 {
   char* ret = nullptr;
-  char* lstSet = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_set);
-  char* lstClr = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_clr);
-  if (lstSet && lstSet) {
-    ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
-      zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
-  };
+  char* lstSet = nullptr;
+  char* lstClr = nullptr;
+  lstSet = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_set);
+  RE_MEM_CHECK(logTAG, lstSet, goto exit);
+  lstClr = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_clr);
+  RE_MEM_CHECK(logTAG, lstClr, goto exit);
+  ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
+    zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
+exit:
   if (lstSet) free(lstSet);
   if (lstClr) free(lstClr);
   return ret;
@@ -1226,7 +1229,7 @@ static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
 
 static void alarmMqttPublishStatus()
 {
-  if (statesMqttIsConnected()) {
+  if (statesMqttIsEnabled()) {
     char * topicStatus = nullptr;
 
     #if CONFIG_ALARM_MQTT_DEVICE_STATUS
@@ -1246,156 +1249,136 @@ static void alarmMqttPublishStatus()
           CONFIG_ALARM_MQTT_SECURITY_TOPIC, CONFIG_ALARM_MQTT_STATUS_TOPIC); 
       #endif // CONFIG_ALARM_MQTT_DEVICE_TOPIC
     #endif // CONFIG_ALARM_MQTT_DEVICE_STATUS
+    RE_MEM_CHECK(logTAG, topicStatus, return);
 
-    if (topicStatus) {
-      char * jsonStatus = nullptr;
-      char * jsonZones = nullptr;
-      char * jsonZone = nullptr;
-      char * jsonTemp = nullptr;
-      char * statusSummary = nullptr;
-      char * statusAnnunciator = nullptr;
-      char * jsonLastAlarm = nullptr;
-      char * jsonLastEvent = nullptr;
+    char * jsonStatus = nullptr;
+    char * jsonZones = nullptr;
+    char * jsonZone = nullptr;
+    char * jsonTemp = nullptr;
+    char * statusSummary = nullptr;
+    char * statusAnnunciator = nullptr;
+    char * jsonLastAlarm = nullptr;
+    char * jsonLastEvent = nullptr;
 
-      // Getting names of sensors
-      const char* sensorLastAlarm = nullptr;
-      const char* sensorLastEvent = nullptr;
-      if (_alarmLastAlarmData.sensor) {
-        sensorLastAlarm = _alarmLastAlarmData.sensor->name;
-      } else {
-        sensorLastAlarm = CONFIG_ALARM_MQTT_STATUS_DEVICE_EMPTY;
-      };
-      if (_alarmLastEventData.sensor) {
-        sensorLastEvent = _alarmLastEventData.sensor->name;
-      } else {
-        sensorLastEvent = CONFIG_ALARM_MQTT_STATUS_DEVICE_EMPTY;
-      };
-
-      // Forming an array with zones
-      alarmZoneHandle_t zone;
-      STAILQ_FOREACH(zone, alarmZones, next) {
-        jsonZone = alarmMqttJsonZone(zone);
-        if (jsonZone) {
-          if (jsonZones) {
-            jsonTemp = jsonZones;
-            jsonZones = malloc_stringf("%s,%s", jsonTemp, jsonZone);
-            free(jsonTemp);
-          } else {
-            jsonZones = malloc_string(jsonZone);
-          };
-          free(jsonZone);
-        };
-      };
-
-      // Select mode labels
-      const char* sMode = CONFIG_ALARM_MODE_CHAR_DISABLED;
-      if (_alarmMode == ASM_ARMED) {
-        sMode = CONFIG_ALARM_MODE_CHAR_ARMED;        
-      } else if (_alarmMode == ASM_PERIMETER) {
-        sMode = CONFIG_ALARM_MODE_CHAR_PERIMETER;    
-      } else if (_alarmMode == ASM_OUTBUILDINGS) {
-        sMode = CONFIG_ALARM_MODE_CHAR_OUTBUILDINGS;
-      };
-
-      // Select annunciator labels
-      const char* sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_OFF;
-      if (_sirenActive) {
-        if (_flasherActive) {
-          sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_TOTAL;
-        } else {
-          sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_SIREN;
-        };
-      } else {
-        if (_flasherActive) {
-          sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_FLASHER;
-        };
-      };
-
-      // Generate status line
-      statusSummary = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_SUMMARY, sMode, _alarmCount, sAnnunciator);
-      if (!statusSummary) {
-        rlog_e(logTAG, "Failed to generate status line!");
-        goto free_strings_error;
-      };
-
-      // Generate annunciator status
-      statusAnnunciator = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ANNUNCIATOR, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
-      if (!statusAnnunciator) {
-        rlog_e(logTAG, "Failed to generate annunciator status!");
-        goto free_strings_error;
-      };
-
-      // Generate last event data
-      alarmFormatTimestamps(_alarmLastEvent);
-      jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
-      if (!jsonLastEvent) {
-        rlog_e(logTAG, "Failed to generate information about recent event!");
-        goto free_strings_error;
-      };
-
-
-      // Generate last alarm data
-      alarmFormatTimestamps(_alarmLastAlarm);
-      jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
-      if (!jsonLastAlarm) {
-        rlog_e(logTAG, "Failed to generate information about recent alarm!");
-        goto free_strings_error;
-      };
-
-      // Generate full JSON string
-      #if CONFIG_ALARM_MQTT_STATUS_DISPLAY
-        if (jsonZones) {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"display\":\"%s\n%s\n%s\",\"zones\":{%s}}", 
-            _alarmMode, _alarmCount, 
-            statusSummary, statusAnnunciator, 
-            jsonLastAlarm, jsonLastEvent, 
-            statusSummary, sensorLastAlarm, _alarmTimestampS,          
-            jsonZones);
-        } else {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"display\":\"%s\n%s\n%s\",\"zones\":{}}", 
-            _alarmMode, _alarmCount, 
-            statusSummary, statusAnnunciator, 
-            jsonLastAlarm, jsonLastEvent, 
-            statusSummary, sensorLastAlarm, _alarmTimestampS);
-        };
-      #else
-        if (jsonZones) {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"zones\":{%s}}", 
-            _alarmMode, _alarmCount, 
-            statusSummary, statusAnnunciator, 
-            jsonLastAlarm, jsonLastEvent, 
-            jsonZones);
-        } else {
-          jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"zones\":{}}", 
-            _alarmMode, _alarmCount, 
-            statusSummary, statusAnnunciator, 
-            jsonLastAlarm, jsonLastEvent);
-        };
-      #endif // CONFIG_ALARM_MQTT_STATUS_DISPLAY
-      
-      if (jsonStatus) {
-        mqttPublish(topicStatus, jsonStatus, 
-          CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, false, true, true);
-        goto free_strings_ok;
-      } else {
-        rlog_e(logTAG, "Failed to generate JSON summary!");
-        goto free_strings_error;
-      };
-
-      // Free resources
-      free_strings_error:
-        if (jsonStatus) free(jsonStatus);
-        goto free_strings_ok;
-
-      free_strings_ok:
-        if (jsonZones) free(jsonZones);
-        if (statusSummary) free(statusSummary);
-        if (statusAnnunciator) free(statusAnnunciator);
-        if (jsonLastAlarm) free(jsonLastAlarm);
-        if (jsonLastEvent) free(jsonLastEvent);
+    // Getting names of sensors
+    const char* sensorLastAlarm = nullptr;
+    const char* sensorLastEvent = nullptr;
+    if (_alarmLastAlarmData.sensor) {
+      sensorLastAlarm = _alarmLastAlarmData.sensor->name;
     } else {
-      rlog_e(logTAG, "Failed to generate a topic for publishing an alarm status!");
+      sensorLastAlarm = CONFIG_ALARM_MQTT_STATUS_DEVICE_EMPTY;
     };
+    if (_alarmLastEventData.sensor) {
+      sensorLastEvent = _alarmLastEventData.sensor->name;
+    } else {
+      sensorLastEvent = CONFIG_ALARM_MQTT_STATUS_DEVICE_EMPTY;
+    };
+
+    // Forming an array with zones
+    alarmZoneHandle_t zone;
+    STAILQ_FOREACH(zone, alarmZones, next) {
+      jsonZone = alarmMqttJsonZone(zone);
+      if (jsonZone) {
+        if (jsonZones) {
+          jsonTemp = jsonZones;
+          jsonZones = malloc_stringf("%s,%s", jsonTemp, jsonZone);
+          free(jsonTemp);
+        } else {
+          jsonZones = malloc_string(jsonZone);
+        };
+        free(jsonZone);
+      };
+    };
+
+    // Select mode labels
+    const char* sMode = CONFIG_ALARM_MODE_CHAR_DISABLED;
+    if (_alarmMode == ASM_ARMED) {
+      sMode = CONFIG_ALARM_MODE_CHAR_ARMED;        
+    } else if (_alarmMode == ASM_PERIMETER) {
+      sMode = CONFIG_ALARM_MODE_CHAR_PERIMETER;    
+    } else if (_alarmMode == ASM_OUTBUILDINGS) {
+      sMode = CONFIG_ALARM_MODE_CHAR_OUTBUILDINGS;
+    };
+
+    // Select annunciator labels
+    const char* sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_OFF;
+    if (_sirenActive) {
+      if (_flasherActive) {
+        sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_TOTAL;
+      } else {
+        sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_SIREN;
+      };
+    } else {
+      if (_flasherActive) {
+        sAnnunciator = CONFIG_ALARM_ANNUNCIATOR_FLASHER;
+      };
+    };
+
+    // Generate status line
+    statusSummary = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_SUMMARY, sMode, _alarmCount, sAnnunciator);
+    RE_MEM_CHECK(logTAG, statusSummary, goto free_strings_error);
+
+    // Generate annunciator status
+    statusAnnunciator = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ANNUNCIATOR, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
+    RE_MEM_CHECK(logTAG, statusAnnunciator, goto free_strings_error);
+
+    // Generate last event data
+    alarmFormatTimestamps(_alarmLastEvent);
+    jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
+    RE_MEM_CHECK(logTAG, jsonLastEvent, goto free_strings_error);
+
+    // Generate last alarm data
+    alarmFormatTimestamps(_alarmLastAlarm);
+    jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
+    RE_MEM_CHECK(logTAG, jsonLastAlarm, goto free_strings_error);
+
+    // Generate full JSON string
+    #if CONFIG_ALARM_MQTT_STATUS_DISPLAY
+      if (jsonZones) {
+        jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"display\":\"%s\n%s\n%s\",\"zones\":{%s}}", 
+          _alarmMode, _alarmCount, 
+          statusSummary, statusAnnunciator, 
+          jsonLastAlarm, jsonLastEvent, 
+          statusSummary, sensorLastAlarm, _alarmTimestampS,          
+          jsonZones);
+      } else {
+        jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"display\":\"%s\n%s\n%s\",\"zones\":{}}", 
+          _alarmMode, _alarmCount, 
+          statusSummary, statusAnnunciator, 
+          jsonLastAlarm, jsonLastEvent, 
+          statusSummary, sensorLastAlarm, _alarmTimestampS);
+      };
+    #else
+      if (jsonZones) {
+        jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"zones\":{%s}}", 
+          _alarmMode, _alarmCount, 
+          statusSummary, statusAnnunciator, 
+          jsonLastAlarm, jsonLastEvent, 
+          jsonZones);
+      } else {
+        jsonStatus = malloc_stringf("{\"mode\":%d,\"alarms\":%d,\"status\":\"%s\",\"annunciator\":%s,\"alarm\":%s,\"event\":%s,\"zones\":{}}", 
+          _alarmMode, _alarmCount, 
+          statusSummary, statusAnnunciator, 
+          jsonLastAlarm, jsonLastEvent);
+      };
+    #endif // CONFIG_ALARM_MQTT_STATUS_DISPLAY
+    RE_MEM_CHECK(logTAG, jsonLastAlarm, goto free_strings_error);
+    
+    mqttPublish(topicStatus, jsonStatus, 
+      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, false, true, true);
+    goto free_strings_ok;
+
+    // Free resources
+    free_strings_error:
+      if (jsonStatus) free(jsonStatus);
+      goto free_strings_ok;
+
+    free_strings_ok:
+      if (jsonZones) free(jsonZones);
+      if (statusSummary) free(statusSummary);
+      if (statusAnnunciator) free(statusAnnunciator);
+      if (jsonLastAlarm) free(jsonLastAlarm);
+      if (jsonLastEvent) free(jsonLastEvent);
   };
 }
 
