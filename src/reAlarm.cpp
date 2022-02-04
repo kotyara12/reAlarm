@@ -59,6 +59,7 @@ static time_t _alarmLastAlarm = 0;
 static alarmEventData_t _alarmLastEventData = {nullptr, nullptr};
 static alarmEventData_t _alarmLastAlarmData = {nullptr, nullptr};
 
+static void alarmAlarmsReset();
 static void alarmSensorsReset();
 static void alarmSirenAlarmOff();
 static void alarmFlasherAlarmOff();
@@ -95,6 +96,8 @@ static const char* alarmSourceText(alarm_control_t source, const char* sensor)
       } else {
         return CONFIG_ALARM_SOURCE_RCONTROL;
       };
+    case ACC_COMMANDS:
+      return CONFIG_ALARM_SOURCE_COMMAND;
     default:
       return CONFIG_ALARM_SOURCE_MQTT;
   };
@@ -116,10 +119,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 
     // Reset counters
     if (newMode != ASM_DISABLED) {
-      _alarmCount = 0;
-      _alarmLastAlarm = 0;
-      _alarmLastAlarmData = {nullptr, nullptr};
-      alarmSensorsReset();
+      alarmAlarmsReset();
     };
 
     // Disable siren if ASM_DISABLED mode is set
@@ -322,7 +322,7 @@ static void alarmFlasherChangeMode()
   } else {
     if (_alarmMode == ASM_DISABLED) {
       rlog_d(logTAG, "Flasher disabled");
-      // Security is fully enabled
+      // Security is fully disabled
       eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_FLASHER_OFF, nullptr, 0, portMAX_DELAY);
       alarmFlasherBlinkOn(0, 0, 0);
       vTaskDelay(10);
@@ -367,11 +367,9 @@ static void alarmFlasherAlarmOn()
 
 static void alarmFlasherAlarmOff() 
 {
-  if (_flasherActive) {
-    _flasherActive = false;
-    alarmFlasherTimerStop();
-    alarmFlasherChangeMode();
-  };
+  _flasherActive = false;
+  alarmFlasherTimerStop();
+  alarmFlasherChangeMode();
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -382,6 +380,8 @@ ledQueue_t _siren = nullptr;
 static uint32_t _sirenDuration = CONFIG_ALARM_DURATION_SIREN;
 static esp_timer_handle_t _sirenTimer = nullptr;
 static bool _sirenActive = false;
+static bool _sirenSilentEnabled = false;
+static timespan_t _sirenSilentPeriod = 22000600;
 
 static void alarmSirenTimerEnd(void* arg)
 {
@@ -438,7 +438,10 @@ static void alarmSirenSwitch()
 
 static void alarmSirenAlarmOn() 
 {
-  if (!_sirenActive && alarmSirenTimerStart()) {
+  if (!_sirenActive 
+   && !(_sirenSilentEnabled && checkTimespanNow(_sirenSilentPeriod)) 
+   && alarmSirenTimerStart()) 
+  {
     _sirenActive = true;
     alarmSirenSwitch();
   };
@@ -446,11 +449,9 @@ static void alarmSirenAlarmOn()
 
 static void alarmSirenAlarmOff() 
 {
-  if (_sirenActive) {
-    _sirenActive = false;
-    alarmSirenTimerStop();
-    alarmSirenSwitch();
-  };
+  _sirenActive = false;
+  alarmSirenTimerStop();
+  alarmSirenSwitch();
 }
 
 static void alarmSirenChangeMode()
@@ -499,6 +500,39 @@ static void alarmSirenChangeMode()
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
+// ------------------------------------------------------- Alarms --------------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
+static void alarmAlarmsReset()
+{
+  _alarmCount = 0;
+  _alarmLastAlarm = 0;
+  _alarmLastAlarmData = {nullptr, nullptr};
+  alarmSensorsReset();
+}
+
+static bool alarmAlarmCancel(const char* source)
+{
+  bool alarmCanceled = _sirenActive || _flasherActive;
+
+  _alarmCount = 0;
+  alarmSirenAlarmOff();
+  alarmFlasherAlarmOff();
+  if (alarmCanceled) {
+    alarmBuzzerAlarmOff();
+  };
+
+  #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+    if (alarmCanceled) {
+      tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+        CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, source);
+    };
+  #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+
+  return alarmCanceled;
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
 // --------------------------------------------------- Initialization ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
@@ -515,6 +549,31 @@ static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int3
     rlog_v(logTAG, "Security mode changed via MQTT, event_id=%d", event_id);
     if (event_id == RE_PARAMS_CHANGED)  {
       alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true, true);
+    };
+  };
+}
+
+static void alarmCommandsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if ((event_id == RE_SYS_COMMAND) && (event_data)) {
+    char* cmd = (char*)event_data;
+    if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_DISABLED) == 0) {
+      alarmModeChange(ASM_DISABLED, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_ARMED) == 0) {
+      alarmModeChange(ASM_ARMED, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_PERIMETER) == 0) {
+      alarmModeChange(ASM_PERIMETER, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_OUTBUILDINGS) == 0) {
+      alarmModeChange(ASM_OUTBUILDINGS, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_CANCEL) == 0) {
+      rlog_d(logTAG, "Cancel alarm remotely");
+      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
+      alarmMqttPublishStatus();
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_RESET) == 0) {
+      rlog_d(logTAG, "Cancel alarm and clear events remotely");
+      alarmAlarmsReset();
+      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
+      alarmMqttPublishStatus();
     };
   };
 }
@@ -561,6 +620,14 @@ static bool alarmParamsRegister()
     paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_I8, nullptr, pgSecurity, 
         CONFIG_ALARM_PARAMS_BUZZER_KEY, CONFIG_ALARM_PARAMS_BUZZER_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmBuzzerEnabled),
     0, 1);
+  paramsSetLimitsU8(
+    paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_I8, nullptr, pgSecurity, 
+        CONFIG_ALARM_PARAMS_SIREN_SILENT_ENABLED_KEY, CONFIG_ALARM_PARAMS_SIREN_SILENT_ENABLED_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_sirenSilentEnabled),
+    0, 1);
+  paramsSetLimitsU32(
+    paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_TIMESPAN, nullptr, pgSecurity, 
+        CONFIG_ALARM_PARAMS_SIREN_SILENT_PERIOD_KEY, CONFIG_ALARM_PARAMS_SIREN_SILENT_PERIOD_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_sirenSilentPeriod),
+    0, 23592358);
 
   return eventHandlerRegister(RE_PARAMS_EVENTS, ESP_EVENT_ANY_ID, &alarmParamsEventHandler, nullptr);
 }
@@ -574,6 +641,7 @@ extern bool alarmSystemInit(cb_alarm_change_mode_t cb_mode)
   return alarmSirenTimerCreate() 
       && alarmFlasherTimerCreate() 
       && alarmParamsRegister()
+      && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_COMMAND, &alarmCommandsEventHandler, nullptr)
       && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_OTA, &alarmOtaEventHandler, nullptr);
 }
 
@@ -785,16 +853,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   if (state) {
     if (event_data.event->type == ASE_CTRL_OFF) {
       // If the alarm is currently on, then first we just reset the alarm
-      if (_sirenActive || _flasherActive) {
-        alarmSirenAlarmOff();
-        alarmFlasherAlarmOff();
-        alarmBuzzerAlarmOff();
-        #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_CANCELED, 
-            alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
-        #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-      } else {
+      if (!alarmAlarmCancel(alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name))) {
         alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
       };
     } else if (event_data.event->type == ASE_CTRL_ON) {
