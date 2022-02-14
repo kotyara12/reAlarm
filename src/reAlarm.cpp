@@ -61,8 +61,9 @@ static alarmEventData_t _alarmLastAlarmData = {nullptr, nullptr};
 
 static void alarmAlarmsReset();
 static void alarmSensorsReset();
-static void alarmSirenAlarmOff();
-static void alarmFlasherAlarmOff();
+static void alarmBuzzerAlarmOff();
+static void alarmSirenAlarmOff(bool forced);
+static void alarmFlasherAlarmOff(bool forced);
 static void alarmSirenChangeMode();
 static void alarmFlasherChangeMode();
 static void alarmBuzzerChangeMode();
@@ -105,6 +106,9 @@ static const char* alarmSourceText(alarm_control_t source, const char* sensor)
 
 static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const char* sensor, bool forced, bool publish_status)
 {
+  rlog_d(logTAG, "Change security mode: source=%d, new mode=%d, curr mode=%d, forced=%d, sensor=%s", 
+    source, newMode, _alarmMode, forced, (sensor != nullptr) ? sensor : "null");
+
   bool alarmModeChanged = newMode != _alarmMode;
   if (forced || alarmModeChanged) {
     // Store and publish new value
@@ -124,8 +128,8 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 
     // Disable siren if ASM_DISABLED mode is set
     if (newMode == ASM_DISABLED) {
-      alarmSirenAlarmOff();
-      alarmFlasherAlarmOff();
+      alarmSirenAlarmOff(true);
+      alarmFlasherAlarmOff(false);
     };
 
     // One-time siren signal when switching the arming mode
@@ -250,7 +254,7 @@ static bool _flasherActive = false;
 
 static void alarmFlasherTimerEnd(void* arg)
 {
-  alarmFlasherAlarmOff();
+  alarmFlasherAlarmOff(true);
   alarmMqttPublishStatus();
 }
 
@@ -365,11 +369,13 @@ static void alarmFlasherAlarmOn()
   };
 }
 
-static void alarmFlasherAlarmOff() 
+static void alarmFlasherAlarmOff(bool forced) 
 {
-  _flasherActive = false;
-  alarmFlasherTimerStop();
-  alarmFlasherChangeMode();
+  if (_flasherActive || forced) {
+    _flasherActive = false;
+    alarmFlasherTimerStop();
+    alarmFlasherChangeMode();
+  };
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -385,7 +391,7 @@ static timespan_t _sirenSilentPeriod = 22000600;
 
 static void alarmSirenTimerEnd(void* arg)
 {
-  alarmSirenAlarmOff();
+  alarmSirenAlarmOff(true);
   alarmMqttPublishStatus();
 }
 
@@ -447,11 +453,13 @@ static void alarmSirenAlarmOn()
   };
 }
 
-static void alarmSirenAlarmOff() 
+static void alarmSirenAlarmOff(bool forced) 
 {
-  _sirenActive = false;
-  alarmSirenTimerStop();
-  alarmSirenSwitch();
+  if (_sirenActive || forced) {
+    _sirenActive = false;
+    alarmSirenTimerStop();
+    alarmSirenSwitch();
+  };
 }
 
 static void alarmSirenChangeMode()
@@ -516,8 +524,8 @@ static bool alarmAlarmCancel(const char* source)
   bool alarmCanceled = _sirenActive || _flasherActive;
 
   _alarmCount = 0;
-  alarmSirenAlarmOff();
-  alarmFlasherAlarmOff();
+  alarmSirenAlarmOff(true);
+  alarmFlasherAlarmOff(true);
   if (alarmCanceled) {
     alarmBuzzerAlarmOff();
   };
@@ -852,10 +860,15 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   // Handling arming switch events
   if (state) {
     if (event_data.event->type == ASE_CTRL_OFF) {
-      // If the alarm is currently on, then first we just reset the alarm
-      if (!alarmAlarmCancel(alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name))) {
+      #if CONFIG_ALARM_TOGETHER_DISABLE_SIREN_AND_ALARM
+        // alarmAlarmCancel(alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name));
         alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
-      };
+      #else 
+        // If the alarm is currently active, then first we just reset the alarm
+        if (!alarmAlarmCancel(alarmSourceText(alarmResponsesSource(event_data), event_data.sensor->name))) {
+          alarmModeChange(ASM_DISABLED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
+        };
+      #endif // CONFIG_ALARM_TOGETHER_DISABLE_SIREN_AND_ALARM
     } else if (event_data.event->type == ASE_CTRL_ON) {
       alarmModeChange(ASM_ARMED, alarmResponsesSource(event_data), event_data.sensor->name, false, false);
     } else if (event_data.event->type == ASE_CTRL_PERIMETER) {
