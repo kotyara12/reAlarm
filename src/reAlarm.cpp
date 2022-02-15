@@ -1454,8 +1454,15 @@ static void alarmMqttPublishStatus()
   };
 }
 
+static void alarmMqttEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if (event_id == RE_MQTT_CONNECTED) {
+    alarmMqttPublishStatus();
+  };
+}
+
 // -----------------------------------------------------------------------------------------------------------------------
-// -------------------------------------------------- Task function ------------------------------------------------------
+// ---------------------------------------------------- Task function ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
 static void alarmTaskExec(void *pvParameters)
@@ -1568,6 +1575,16 @@ static void alarmTaskExec(void *pvParameters)
 // -------------------------------------------------- Task routines ------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+static bool alarmTaskRegisterHandlers()
+{
+  return eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler, nullptr);
+}
+
+static bool alarmTaskUnregisterHandlers()
+{
+  return eventHandlerUnregister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler);
+}
+
 bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode) 
 {
   if (!_alarmTask) {
@@ -1603,7 +1620,7 @@ bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, 
       }
       else {
         rloga_i("Task [ %s ] has been successfully started", alarmTaskName);
-        return true;
+        return alarmTaskRegisterHandlers();
       };
     };
   };
@@ -1613,10 +1630,10 @@ bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, 
 bool alarmTaskSuspend()
 {
   if ((_alarmTask) && (eTaskGetState(_alarmTask) != eSuspended)) {
+    alarmTaskUnregisterHandlers();
     vTaskSuspend(_alarmTask);
     if (eTaskGetState(_alarmTask) == eSuspended) {
       rloga_d("Task [ %s ] has been suspended", alarmTaskName);
-      return true;
     } else {
       rloga_e("Failed to suspend task [ %s ]!", alarmTaskName);
     };
@@ -1630,7 +1647,7 @@ bool alarmTaskResume()
     vTaskResume(_alarmTask);
     if (eTaskGetState(_alarmTask) != eSuspended) {
       rloga_i("Task [ %s ] has been successfully resumed", alarmTaskName);
-      return true;
+      return alarmTaskRegisterHandlers();
     } else {
       rloga_e("Failed to resume task [ %s ]!", alarmTaskName);
     };
@@ -1646,6 +1663,7 @@ void alarmTaskDelete()
       _alarmQueue = nullptr;
     };
 
+    alarmTaskUnregisterHandlers();
     vTaskDelete(_alarmTask);
     _alarmTask = nullptr;
     rloga_d("Task [ %s ] was deleted", alarmTaskName);
