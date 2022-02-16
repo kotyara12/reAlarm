@@ -544,48 +544,6 @@ static bool alarmAlarmCancel(const char* source)
 // --------------------------------------------------- Initialization ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-static void alarmMqttEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
-{
-  rlog_v(logTAG, "Restore security mode...");
-  alarmModeChange(_alarmMode, ACC_STORED, nullptr, true, true);
-  eventHandlerUnregister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, alarmMqttEventHandler);
-}
-
-static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
-{
-  if (*(uint32_t*)event_data == (uint32_t)&_alarmMode) {
-    rlog_v(logTAG, "Security mode changed via MQTT, event_id=%d", event_id);
-    if (event_id == RE_PARAMS_CHANGED)  {
-      alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true, true);
-    };
-  };
-}
-
-static void alarmCommandsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
-{
-  if ((event_id == RE_SYS_COMMAND) && (event_data)) {
-    char* cmd = (char*)event_data;
-    if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_DISABLED) == 0) {
-      alarmModeChange(ASM_DISABLED, ACC_COMMANDS, nullptr, true, true);
-    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_ARMED) == 0) {
-      alarmModeChange(ASM_ARMED, ACC_COMMANDS, nullptr, true, true);
-    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_PERIMETER) == 0) {
-      alarmModeChange(ASM_PERIMETER, ACC_COMMANDS, nullptr, true, true);
-    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_OUTBUILDINGS) == 0) {
-      alarmModeChange(ASM_OUTBUILDINGS, ACC_COMMANDS, nullptr, true, true);
-    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_CANCEL) == 0) {
-      rlog_d(logTAG, "Cancel alarm remotely");
-      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
-      alarmMqttPublishStatus();
-    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_RESET) == 0) {
-      rlog_d(logTAG, "Cancel alarm and clear events remotely");
-      alarmAlarmsReset();
-      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
-      alarmMqttPublishStatus();
-    };
-  };
-}
-
 static void alarmOtaEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
   if ((event_id == RE_SYS_OTA) && (event_data)) {
@@ -594,6 +552,24 @@ static void alarmOtaEventHandler(void* arg, esp_event_base_t event_base, int32_t
       alarmTaskSuspend();
     } else {
       alarmTaskResume();
+    };
+  };
+}
+
+static void alarmStartEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if (event_id == RE_SYS_STARTED) {
+    rlog_v(logTAG, "Restore security mode...");
+    alarmModeChange(_alarmMode, ACC_STORED, nullptr, true, true);
+  };
+}
+
+static void alarmParamsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if (*(uint32_t*)event_data == (uint32_t)&_alarmMode) {
+    rlog_v(logTAG, "Security mode changed via MQTT, event_id=%d", event_id);
+    if (event_id == RE_PARAMS_CHANGED)  {
+      alarmModeChange(_alarmMode, ACC_MQTT, nullptr, true, true);
     };
   };
 }
@@ -614,7 +590,6 @@ static bool alarmParamsRegister()
   RE_MEM_CHECK(logTAG, _alarmParamMode, return false);
   _alarmParamMode->notify = false;
   paramsSetLimitsU8(_alarmParamMode, (uint8_t)ASM_DISABLED, (uint8_t)ASM_MAX-1);
-  eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, alarmMqttEventHandler, nullptr);
 
   paramsSetLimitsU32(
     paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
@@ -637,7 +612,8 @@ static bool alarmParamsRegister()
         CONFIG_ALARM_PARAMS_SIREN_SILENT_PERIOD_KEY, CONFIG_ALARM_PARAMS_SIREN_SILENT_PERIOD_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_sirenSilentPeriod),
     0, 23592358);
 
-  return eventHandlerRegister(RE_PARAMS_EVENTS, ESP_EVENT_ANY_ID, &alarmParamsEventHandler, nullptr);
+  return eventHandlerRegister(RE_PARAMS_EVENTS, ESP_EVENT_ANY_ID, &alarmParamsEventHandler, nullptr) 
+      && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_STARTED, alarmStartEventHandler, nullptr);
 }
 
 extern bool alarmSystemInit(cb_alarm_change_mode_t cb_mode)
@@ -649,7 +625,6 @@ extern bool alarmSystemInit(cb_alarm_change_mode_t cb_mode)
   return alarmSirenTimerCreate() 
       && alarmFlasherTimerCreate() 
       && alarmParamsRegister()
-      && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_COMMAND, &alarmCommandsEventHandler, nullptr)
       && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_OTA, &alarmOtaEventHandler, nullptr);
 }
 
@@ -1454,11 +1429,52 @@ static void alarmMqttPublishStatus()
   };
 }
 
+// -----------------------------------------------------------------------------------------------------------------------
+// ---------------------------------------------------- Event handlers ---------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
+
 static void alarmMqttEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
   if (event_id == RE_MQTT_CONNECTED) {
     alarmMqttPublishStatus();
   };
+}
+
+static void alarmCommandsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+  if ((event_id == RE_SYS_COMMAND) && (event_data)) {
+    char* cmd = (char*)event_data;
+    if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_DISABLED) == 0) {
+      alarmModeChange(ASM_DISABLED, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_ARMED) == 0) {
+      alarmModeChange(ASM_ARMED, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_PERIMETER) == 0) {
+      alarmModeChange(ASM_PERIMETER, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_OUTBUILDINGS) == 0) {
+      alarmModeChange(ASM_OUTBUILDINGS, ACC_COMMANDS, nullptr, true, true);
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_CANCEL) == 0) {
+      rlog_d(logTAG, "Cancel alarm remotely");
+      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
+      alarmMqttPublishStatus();
+    } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_RESET) == 0) {
+      rlog_d(logTAG, "Cancel alarm and clear events remotely");
+      alarmAlarmsReset();
+      alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
+      alarmMqttPublishStatus();
+    };
+  };
+}
+
+static bool alarmTaskRegisterHandlers()
+{
+  return eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler, nullptr)
+      && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_COMMAND, &alarmCommandsEventHandler, nullptr);
+}
+
+static void alarmTaskUnregisterHandlers()
+{
+  eventHandlerUnregister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler);
+  eventHandlerUnregister(RE_SYSTEM_EVENTS, RE_SYS_COMMAND, &alarmCommandsEventHandler);
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
@@ -1572,18 +1588,8 @@ static void alarmTaskExec(void *pvParameters)
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
-// -------------------------------------------------- Task routines ------------------------------------------------------
+// ---------------------------------------------------- Task routines ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
-
-static bool alarmTaskRegisterHandlers()
-{
-  return eventHandlerRegister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler, nullptr);
-}
-
-static bool alarmTaskUnregisterHandlers()
-{
-  return eventHandlerUnregister(RE_MQTT_EVENTS, RE_MQTT_CONNECTED, &alarmMqttEventHandler);
-}
 
 bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode) 
 {
