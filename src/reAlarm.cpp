@@ -1248,7 +1248,7 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
         malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
           event_data.event->state, _alarmTimestampL, _alarmTimestampS, event_data.event->event_last, event_data.event->events_count), 
-        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, false, true, true);
+        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true, true);
       
       free(topicSensor);
     } else {
@@ -1412,7 +1412,7 @@ static void alarmMqttPublishStatus()
     RE_MEM_CHECK(logTAG, jsonLastAlarm, goto free_strings_error);
     
     mqttPublish(topicStatus, jsonStatus, 
-      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, false, true, true);
+      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, true, true, true);
     goto free_strings_ok;
 
     // Free resources
