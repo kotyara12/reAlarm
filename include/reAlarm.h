@@ -102,7 +102,7 @@ typedef enum {
   ASE_ALARM,              // Сигнал тревоги
   ASE_TAMPER,             // Попытка вскрытия датчика
   ASE_POWER,              // Состояние электропитания
-  ASE_LOW_BATTERY,        // Низкий уровень заряда батареи
+  ASE_BATTERY_LOW,        // Низкий уровень заряда батареи
   ASE_CTRL_OFF,           // Пульт: режим охраны отключен
   ASE_CTRL_ON,            // Пульт: режим охраны включен
   ASE_CTRL_PERIMETER,     // Пульт: режим охраны периметра
@@ -160,6 +160,7 @@ typedef struct alarmEvent_t {
   alarmZoneHandle_t zone;
   alarm_event_t type;
   bool state;
+  bool confirm;
   uint32_t value_set;
   const char* msg_set;
   uint32_t value_clr;
@@ -278,10 +279,10 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
  * Инициализация прерываний для проводних зон
  * @brief Инициализация обработчиков прерываний для проводних зон
  * @param sensor Указатель на датчик, созданный alarmSensorAdd()
- * */
 bool alarmSensorsWiredInit(alarmSensorHandle_t sensor, gpio_pull_mode_t pull);
 bool alarmSensorsWiredStart(alarmSensorHandle_t sensor);
 bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
+ * */
 
 /**
  * Добавить событие датчика
@@ -299,7 +300,7 @@ bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
  * */
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
   uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
-  uint16_t threshold, uint32_t timeout_clr);
+  uint16_t threshold, uint32_t timeout_clr, bool alarm_confirm);
 
 #ifdef __cplusplus
 }
