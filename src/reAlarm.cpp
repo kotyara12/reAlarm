@@ -34,6 +34,7 @@ TaskHandle_t _alarmTask;
 QueueHandle_t _alarmQueue = nullptr;
 ledQueue_t _ledRx433 = nullptr;
 ledQueue_t _ledAlarm = nullptr;
+ledQueue_t _buzzer = nullptr;
 
 #define ALARM_QUEUE_ITEM_SIZE sizeof(input_data_t)
 #if CONFIG_ALARM_STATIC_ALLOCATION
@@ -206,22 +207,50 @@ static void alarmBuzzerChangeMode()
   if (_alarmBuzzerEnabled) {
     if (_alarmMode == ASM_DISABLED) {
       if (_alarmCount > 0) {
-        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
-          CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
-          CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
+        if (_buzzer) {
+          ledTaskSend(_buzzer, lmFlash, 
+            CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY,
+            CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION,
+            CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION);
+        } else {
+          beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_WARNING_FREQUENCY, 
+            CONFIG_ALARM_BUZZER_DISABLED_WARNING_DURATION, 
+            CONFIG_ALARM_BUZZER_DISABLED_WARNING_QUANTITY);
+        };
       } else {
-        beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
-          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
-          CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
+        if (_buzzer) {
+          ledTaskSend(_buzzer, lmFlash, 
+            CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY,
+            CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION,
+            CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION);
+        } else {
+          beepTaskSend(CONFIG_ALARM_BUZZER_DISABLED_NORMAL_FREQUENCY, 
+            CONFIG_ALARM_BUZZER_DISABLED_NORMAL_DURATION, 
+            CONFIG_ALARM_BUZZER_DISABLED_NORMAL_QUANTITY);
+        };
       };
     } else if (_alarmMode == ASM_ARMED) {
-      beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_ARMED_DURATION, 
-        CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
+      if (_buzzer) {
+        ledTaskSend(_buzzer, lmFlash, 
+          CONFIG_ALARM_BUZZER_ARMED_QUANTITY,
+          CONFIG_ALARM_BUZZER_ARMED_DURATION,
+          CONFIG_ALARM_BUZZER_ARMED_DURATION);
+      } else {
+        beepTaskSend(CONFIG_ALARM_BUZZER_ARMED_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_ARMED_DURATION, 
+          CONFIG_ALARM_BUZZER_ARMED_QUANTITY);
+      };
     } else {
-      beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
-        CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
-        CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
+      if (_buzzer) {
+        ledTaskSend(_buzzer, lmFlash, 
+          CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY,
+          CONFIG_ALARM_BUZZER_PARTIAL_DURATION,
+          CONFIG_ALARM_BUZZER_PARTIAL_DURATION);
+      } else {
+        beepTaskSend(CONFIG_ALARM_BUZZER_PARTIAL_FREQUENCY, 
+          CONFIG_ALARM_BUZZER_PARTIAL_DURATION, 
+          CONFIG_ALARM_BUZZER_PARTIAL_QUANTITY);
+      };
     };
   };
 }
@@ -229,18 +258,32 @@ static void alarmBuzzerChangeMode()
 static void alarmBuzzerAlarmOn()
 {
   if (_alarmBuzzerEnabled) {
-    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
-      CONFIG_ALARM_BUZZER_ALARM_DURATION, 
-      CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
+    if (_buzzer) {
+      ledTaskSend(_buzzer, lmFlash, 
+        CONFIG_ALARM_BUZZER_ALARM_QUANTITY,
+        CONFIG_ALARM_BUZZER_ALARM_DURATION,
+        CONFIG_ALARM_BUZZER_ALARM_DURATION);
+    } else {
+      beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_ALARM_DURATION, 
+        CONFIG_ALARM_BUZZER_ALARM_QUANTITY);
+    };
   };
 }
 
 static void alarmBuzzerAlarmOff()
 {
   if (_alarmBuzzerEnabled) {
-    beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_CLEAR_FREQUENCY, 
-      CONFIG_ALARM_BUZZER_ALARM_CLEAR_DURATION, 
-      CONFIG_ALARM_BUZZER_ALARM_CLEAR_QUANTITY);
+    if (_buzzer) {
+      ledTaskSend(_buzzer, lmFlash, 
+        CONFIG_ALARM_BUZZER_ALARM_CLEAR_QUANTITY,
+        CONFIG_ALARM_BUZZER_ALARM_CLEAR_DURATION,
+        CONFIG_ALARM_BUZZER_ALARM_CLEAR_DURATION);
+    } else {
+      beepTaskSend(CONFIG_ALARM_BUZZER_ALARM_CLEAR_FREQUENCY, 
+        CONFIG_ALARM_BUZZER_ALARM_CLEAR_DURATION, 
+        CONFIG_ALARM_BUZZER_ALARM_CLEAR_QUANTITY);
+    };
   };
 }
 
@@ -1689,11 +1732,12 @@ static void alarmTaskExec(void *pvParameters)
 // ---------------------------------------------------- Task routines ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode) 
+bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t buzzer, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode)
 {
   if (!_alarmTask) {
     _siren = siren;
     _flasher = flasher;
+    _buzzer = buzzer;
     _ledAlarm = ledAlarm;
     _ledRx433 = ledRx433;
     

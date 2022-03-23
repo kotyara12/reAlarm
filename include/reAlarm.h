@@ -211,12 +211,13 @@ bool alarmSystemInit(cb_alarm_change_mode_t cb_mode);
  * @brief Создать и запустить задачу ОПС
  * @param siren Ссылка-указатель на виртуальный "светодиод", отвечающий за включение сирены
  * @param flasher Ссылка-указатель на виртуальный "светодиод", отвечающий за включение светового маяка
+ * @param buzzer Ссылка-указатель на виртуальный "светодиод", отвечающий за зуммер
  * @param ledAlarm Ссылка-указатель на светодиод, индицирующий режим работы
  * @param ledRx433 Ссылка-указатель на светодиод, индицирующий получение события с приемника RX433. Можно использовать тот же, что и ledAlarm
  * @param cb_mode Функция обратного вызова, вызываемая при изменении режима охраны
  * @return Успех или неуспех
  * */
-bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode);
+bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t buzzer, ledQueue_t ledAlarm, ledQueue_t ledRx433, cb_alarm_change_mode_t cb_mode);
 
 /**
  * Приостановать задачу
