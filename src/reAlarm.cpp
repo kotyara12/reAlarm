@@ -55,6 +55,7 @@ uint8_t _alarmQueueStorage[CONFIG_ALARM_QUEUE_SIZE * ALARM_QUEUE_ITEM_SIZE];
 static alarm_mode_t _alarmMode = ASM_DISABLED;
 static paramsEntryHandle_t _alarmParamMode = nullptr;
 static cb_alarm_change_mode_t _alarmOnChangeMode = nullptr;
+static bool _alarmStoreUnknownRx433Codes = false;
 static uint32_t _alarmCount = 0;
 static time_t _alarmLastEvent = 0;
 static time_t _alarmLastAlarm = 0;
@@ -740,6 +741,9 @@ static bool alarmParamsRegister()
   paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
     CONFIG_ALARM_PARAMS_CONFIRMATION_TIMEOUT_KEY, CONFIG_ALARM_PARAMS_CONFIRMATION_TIMEOUT_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmConfirmationTimeout);
 
+  paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
+    CONFIG_ALARM_PARAMS_FIX_RX433_CODES_KEY, CONFIG_ALARM_PARAMS_FIX_RX433_CODES_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmStoreUnknownRx433Codes);
+
   return eventHandlerRegister(RE_PARAMS_EVENTS, ESP_EVENT_ANY_ID, &alarmParamsEventHandler, nullptr) 
       && eventHandlerRegister(RE_SYSTEM_EVENTS, RE_SYS_STARTED, alarmStartEventHandler, nullptr);
 }
@@ -1012,19 +1016,19 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
 
   // Relay control
   if (responses & ASR_RELAY_ON) {
-    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_ON, nullptr, 0, portMAX_DELAY);
+    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_ON, event_data.sensor, sizeof(alarmSensorHandle_t), portMAX_DELAY);
     if (event_data.event->zone->relay_ctrl) {
       event_data.event->zone->relay_state = event_data.event->zone->relay_ctrl(true);
     };
   };
   if (responses & ASR_RELAY_OFF) {
-    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_OFF, nullptr, 0, portMAX_DELAY);
+    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_OFF, event_data.sensor, sizeof(alarmSensorHandle_t), portMAX_DELAY);
     if (event_data.event->zone->relay_ctrl) {
       event_data.event->zone->relay_state = event_data.event->zone->relay_ctrl(false);
     };
   };
   if (responses & ASR_RELAY_SWITCH) {
-    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_TOGGLE, nullptr, 0, portMAX_DELAY);
+    eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_RELAY_TOGGLE, event_data.sensor, sizeof(alarmSensorHandle_t), portMAX_DELAY);
     if (event_data.event->zone->relay_ctrl) {
       event_data.event->zone->relay_state = event_data.event->zone->relay_ctrl(!event_data.event->zone->relay_state);
     };
@@ -1129,71 +1133,6 @@ static void alarmSensorsReset()
   };
 }
 
-/*************************************************************************************************************************
-static void IRAM_ATTR alarmSensorsIsrHandler(void* arg)
-{
-  alarmSensorHandle_t sensor = (alarmSensorHandle_t)arg;
-  gpio_num_t gpio = (gpio_num_t)sensor->address;
-
-  input_data_t data;
-  data.source = IDS_GPIO;
-  data.gpio.bus = 0;
-  data.gpio.address = 0;
-  data.gpio.pin = sensor->address;
-  data.gpio.value = 0;
-
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  xQueueSendFromISR(_alarmQueue, &data, &xHigherPriorityTaskWoken);
-  if (xHigherPriorityTaskWoken) {
-    portYIELD_FROM_ISR();
-  };
-}
-
-bool alarmSensorsWiredInit(alarmSensorHandle_t sensor, gpio_pull_mode_t pull)
-{
-  if (sensor && sensor->type == AST_WIRED) {
-    gpio_num_t gpio = (gpio_num_t)sensor->address;
-    gpio_pad_select_gpio(gpio);
-    ERR_CHECK(gpio_set_direction(gpio, GPIO_MODE_INPUT), ERR_GPIO_SET_MODE);
-    ERR_CHECK(gpio_set_pull_mode(gpio, pull), ERR_GPIO_SET_MODE);
-    ERR_CHECK(gpio_set_intr_type(gpio, GPIO_INTR_ANYEDGE), ERR_GPIO_SET_ISR);
-    ERR_CHECK(gpio_isr_handler_add(gpio, alarmSensorsIsrHandler, sensor), ERR_GPIO_SET_ISR);
-    return true;
-  };
-  return false;
-}
-
-bool alarmSensorsWiredStart(alarmSensorHandle_t sensor)
-{
-  if (sensor && _alarmQueue && sensor->type == AST_WIRED) {
-    gpio_num_t gpio = (gpio_num_t)sensor->address;
-    esp_err_t err = gpio_intr_enable(gpio);
-    if (err == ESP_OK) {
-      rlog_i(logTAG, "Interrupt handler for GPIO %d started", gpio);
-      return true;
-    } else {
-      rlog_e(logTAG, "Failed to start interrupt handler for GPIO %d", gpio);
-    };
-  };
-  return false;
-}
-
-bool alarmSensorsWiredStop(alarmSensorHandle_t sensor)
-{
-  if (sensor && sensor->type == AST_WIRED) {
-    gpio_num_t gpio = (gpio_num_t)sensor->address;
-    esp_err_t err = gpio_intr_disable(gpio);
-    if (err == ESP_OK) {
-      rlog_i(logTAG, "Interrupt handler for GPIO %d stopped", gpio);
-      return true;
-    } else {
-      rlog_e(logTAG, "Failed to stop interrupt handler for GPIO %d", gpio);
-    };
-  };
-  return false;
-}
-*************************************************************************************************************************/
-
 // -----------------------------------------------------------------------------------------------------------------------
 // ------------------------------------------------- Sensor events -------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
@@ -1228,6 +1167,8 @@ bool alarmEventCheckAddress(const input_data_t data, alarmSensorHandle_t sensor)
       return (data.source == IDS_RX433) && ((data.rx433.value >> 4) == sensor->address);
     case AST_WIRED:
       return (data.source == IDS_GPIO) && (((data.gpio.bus << 16) | (data.gpio.address << 8) | data.gpio.pin) == sensor->address);
+    case AST_MQTT:
+      return (data.source == IDS_MQTT) && (data.ext.id == sensor->address);
     default:
       return false;
   };
@@ -1241,6 +1182,8 @@ static bool alarmEventCheckValueSet(const input_data_t data, alarm_sensor_type_t
       return true;
     case AST_RX433_20A4C:
       return (data.rx433.value & 0x0f) == event->value_set;
+    case AST_MQTT:
+      return data.ext.value == event->value_set;
     default:
       return data.gpio.value == event->value_set;
   };
@@ -1254,6 +1197,8 @@ static bool alarmEventCheckValueClr(const input_data_t data, alarm_sensor_type_t
       return false;
     case AST_RX433_20A4C:
       return (data.rx433.value & 0x0f) == event->value_clr;
+    case AST_MQTT:
+      return data.ext.value == event->value_clr;
     default:
       return data.gpio.value == event->value_clr;
   };
@@ -1269,6 +1214,9 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
   } else if (data.source == IDS_RX433) {
     rlog_i(logTAG, "Incoming message:: end of packet: %d, source: RX433, value: 0x%.8X, address: 0x%.8X, command: 0x%02X, count: %d", 
       end_of_packet, data.rx433.value, data.rx433.value >> 4, data.rx433.value & 0x0f, data.count);
+  } else if (data.source == IDS_MQTT) {
+    rlog_i(logTAG, "Incoming message:: end of packet: %d, source: MQTT, value: 0x%.8X, id: 0x%.8X", 
+      end_of_packet, data.ext.value, data.ext.id);
   } else {
     rlog_e(logTAG, "Incoming message:: end of packet: %d, source: %d, UNSUPPORTED TYPE!!!", 
       end_of_packet, data.source);
@@ -1312,6 +1260,16 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
   };
 
   if (end_of_packet && (data.source == IDS_RX433) && (data.rx433.value > 0xffff)) {
+    if (_alarmStoreUnknownRx433Codes && statesMqttIsServerEnabled()) {
+      char* sid = malloc_stringf("0x%.8X", data.rx433.value);
+      if (sid) {
+        mqttPublish(
+          mqttGetTopicDevice2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_RX433_UNKNOWN_LOCAL, CONFIG_ALARM_MQTT_RX433_UNKNOWN_TOPIC, sid), 
+          malloc_timestr(CONFIG_FORMAT_DTS, time(nullptr)),
+          CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, true, true, true);
+        free(sid);
+      };
+    };
     if (sensor) {
       // Sensor found, but no command defined
       rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data.rx433.value, sensor->name);
@@ -1585,6 +1543,17 @@ static void alarmMqttPublishStatus()
 // ---------------------------------------------------- Event handlers ---------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+bool alarmPostQueueExtId(source_type_t source, uint32_t id, uint8_t value)
+{
+  input_data_t queue_data;
+  memset(&queue_data, 0, sizeof(input_data_t));
+  queue_data.source = source;
+  queue_data.count = 1;
+  queue_data.ext.id = id;
+  queue_data.ext.value = value;
+  return xQueueSend(_alarmQueue, &queue_data, portMAX_DELAY) == pdPASS;
+}
+
 static void alarmGpioEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
   // Get GPIO signals from main event loop and redirect in mixed input stream
@@ -1704,7 +1673,7 @@ static void alarmTaskExec(void *pvParameters)
 
       // Handling others non-repeating signals
       else if (data.source > IDS_NONE) {
-        // rlog_d(logTAG, "Process signal (UNKNOWN): source=%d, count=%d", data.source, data.count);
+        // rlog_d(logTAG, "Process signal (EXTERNAL): source=%d, count=%d", data.source, data.count);
         alarmProcessIncomingData(data, true);
       } 
       

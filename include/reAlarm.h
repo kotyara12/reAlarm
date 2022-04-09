@@ -30,16 +30,16 @@
  * 
  * Реакция на события задается битовыми флагами для каждого режима работы
  * */
-static const uint16_t ASR_ALARM_INC    = BIT0;  // Увеличить счетчик тревог
-static const uint16_t ASR_ALARM_DEC    = BIT1;  // Уменьшить счетчик тревог
-static const uint16_t ASR_MQTT_EVENT   = BIT2;  // Публикация события на MQTT
-static const uint16_t ASR_MQTT_STATUS  = BIT3;  // Публикация состояния охраны на MQTT
-static const uint16_t ASR_TELEGRAM     = BIT4;  // Уведомление в Telegram
-static const uint16_t ASR_SIREN        = BIT5;  // Включить сирену
-static const uint16_t ASR_FLASHER      = BIT6;  // Включить маячок
-static const uint16_t ASR_BUZZER       = BIT7;  // Звуковой сигнал на пульте
-static const uint16_t ASR_RELAY_ON     = BIT8;  // Включить реле (нагрузку)
-static const uint16_t ASR_RELAY_OFF    = BIT9;  // Выключить реле (нагрузку)
+static const uint16_t ASR_ALARM_INC    = BIT0;   // Увеличить счетчик тревог
+static const uint16_t ASR_ALARM_DEC    = BIT1;   // Уменьшить счетчик тревог
+static const uint16_t ASR_MQTT_EVENT   = BIT2;   // Публикация события на MQTT
+static const uint16_t ASR_MQTT_STATUS  = BIT3;   // Публикация состояния охраны на MQTT
+static const uint16_t ASR_TELEGRAM     = BIT4;   // Уведомление в Telegram
+static const uint16_t ASR_SIREN        = BIT5;   // Включить сирену
+static const uint16_t ASR_FLASHER      = BIT6;   // Включить маячок
+static const uint16_t ASR_BUZZER       = BIT7;   // Звуковой сигнал на пульте
+static const uint16_t ASR_RELAY_ON     = BIT8;   // Включить реле (нагрузку)
+static const uint16_t ASR_RELAY_OFF    = BIT9;   // Выключить реле (нагрузку)
 static const uint16_t ASR_RELAY_SWITCH = BIT10;  // Переключить реле (нагрузку)
 
 // "Стандартные" наборы реакций
@@ -302,6 +302,15 @@ bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
   uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
   uint16_t threshold, uint32_t timeout_clr, bool alarm_confirm);
+
+/**
+ * Отправить внешнее событие в очередь обработки
+ * @brief Отправить внешнее событие в очередь обработки ОПС
+ * @param id Идентификатор события (должен соответствовать адресу виртуального сенсора)
+ * @param value Логический уровень: 1 - тревога, 0 - сброс тревоги
+ * @return true в случае успеха, false в случае отказа
+ * */
+bool alarmPostQueueExtId(source_type_t source, uint32_t id, uint8_t value);
 
 #ifdef __cplusplus
 }
