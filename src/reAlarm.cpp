@@ -61,6 +61,9 @@ static time_t _alarmLastEvent = 0;
 static time_t _alarmLastAlarm = 0;
 static alarmEventData_t _alarmLastEventData = {nullptr, nullptr};
 static alarmEventData_t _alarmLastAlarmData = {nullptr, nullptr};
+static uint16_t _alarmExitTime = CONFIG_ALARM_EXIT_TIME;
+static bool _alarmExitLock = false;
+static esp_timer_handle_t _timerExit = nullptr;
 
 static void alarmAlarmsReset(const char* source);
 static void alarmSensorsReset();
@@ -107,17 +110,60 @@ static const char* alarmSourceText(alarm_control_t source, const char* sensor)
   };
 }
 
-static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const char* sensor, bool forced, bool publish_status)
+static void alarmTimerExitEnd(void* arg)
+{ 
+  if (_alarmExitLock) {
+    _alarmExitLock = false;
+
+    #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+      tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ACTIVATED);
+    #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+  };
+
+  // Free timer
+  if (esp_timer_is_active(_timerExit)) {
+    esp_timer_stop(_timerExit);
+  };
+  esp_timer_delete(_timerExit);
+  _timerExit = nullptr;
+}
+
+static void alarmTimerExitStart()
+{
+  _alarmExitLock = false;
+  if (_alarmExitTime > 0) {
+    if (_timerExit == nullptr) {
+      esp_timer_create_args_t timer_args;
+      memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
+      timer_args.callback = &alarmTimerExitEnd;
+      timer_args.name = "timer_exit";
+      ERR_CHECK(esp_timer_create(&timer_args, &_timerExit), "Failed to create timer of exit");
+    };
+    // If timer already started, stop it
+    if (_timerExit) {
+      if (esp_timer_is_active(_timerExit)) {
+        esp_timer_stop(_timerExit);
+      };
+      // Start once
+      _alarmExitLock = (esp_timer_start_once(_timerExit, (uint64_t)_alarmExitTime * 1000000) == ESP_OK);
+      if (!_alarmExitLock) {
+        rlog_e(logTAG, "Failed to start timer of exit");
+      };
+    };
+  };
+}
+
+static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const char* sensor, bool forced, bool publish_status)
 {
   rlog_d(logTAG, "Change security mode: source=%d, new mode=%d, curr mode=%d, forced=%d, sensor=%s", 
-    source, newMode, _alarmMode, forced, (sensor != nullptr) ? sensor : "null");
+    source, new_mode, _alarmMode, forced, (sensor != nullptr) ? sensor : "null");
 
-  bool alarmModeChanged = newMode != _alarmMode;
+  bool alarmModeChanged = new_mode != _alarmMode;
   if (forced || alarmModeChanged) {
     // Store and publish new value
     if (_alarmParamMode) {
       if (alarmModeChanged) {
-        _alarmMode = newMode;
+        _alarmMode = new_mode;
         paramsValueStore(_alarmParamMode, false);
       } else {
         paramsMqttPublish(_alarmParamMode, true);
@@ -125,12 +171,12 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
     };
 
     // Reset counters
-    if (newMode != ASM_DISABLED) {
+    if (new_mode != ASM_DISABLED) {
       alarmAlarmsReset(nullptr);
     };
 
     // Disable siren if ASM_DISABLED mode is set
-    if (newMode == ASM_DISABLED) {
+    if (new_mode == ASM_DISABLED) {
       alarmSirenAlarmOff(true);
       alarmFlasherAlarmOff(false);
     };
@@ -157,6 +203,10 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
           tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+        // Start exit timer
+        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
+          alarmTimerExitStart();
+        };
         break;
 
       // Perimeter security mode
@@ -167,6 +217,10 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
           tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_PERIMETER, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+        // Start exit timer
+        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
+          alarmTimerExitStart();
+        };
         break;
 
       // Outbuilding security regime
@@ -177,6 +231,10 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
           tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_OUTBUILDINGS, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+        // Start exit timer
+        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
+          alarmTimerExitStart();
+        };
         break;
 
       // Security mode disabled
@@ -747,6 +805,10 @@ static bool alarmParamsRegister()
     0, 23592358);
   paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U32, nullptr, pgSecurity, 
     CONFIG_ALARM_PARAMS_CONFIRMATION_TIMEOUT_KEY, CONFIG_ALARM_PARAMS_CONFIRMATION_TIMEOUT_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmConfirmationTimeout);
+  paramsSetLimitsU16(
+    paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U16, nullptr, pgSecurity, 
+      CONFIG_ALARM_PARAMS_EXIT_TIME_KEY, CONFIG_ALARM_PARAMS_EXIT_TIME_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmExitTime),
+    0, 600);
 
   paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
     CONFIG_ALARM_PARAMS_FIX_RX433_CODES_KEY, CONFIG_ALARM_PARAMS_FIX_RX433_CODES_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmStoreUnknownRx433Codes);
@@ -925,17 +987,19 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
 
     // Fix total status
-    _alarmLastEvent = event_data.event->event_last;
-    _alarmLastEventData = event_data;
-    if (responses & ASR_ALARM_INC) {
-      if (_alarmCount < UINT32_MAX) {
-        _alarmCount++;
+    if (!_alarmExitLock) {
+      _alarmLastEvent = event_data.event->event_last;
+      _alarmLastEventData = event_data;
+      if (responses & ASR_ALARM_INC) {
+        if (_alarmCount < UINT32_MAX) {
+          _alarmCount++;
+        };
+        _alarmLastAlarm = event_data.event->event_last;
+        _alarmLastAlarmData = event_data;
       };
-      _alarmLastAlarm = event_data.event->event_last;
-      _alarmLastAlarmData = event_data;
-    };
-    if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
-      _alarmCount--;
+      if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
+        _alarmCount--;
+      };
     };
 
     eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_SIGNAL_SET, &event_data, sizeof(alarmEventData_t), portMAX_DELAY);
@@ -960,15 +1024,17 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     };
 
     // Fix total status
-    if (responses & ASR_ALARM_INC) {
-      if (_alarmCount < UINT32_MAX) {
-        _alarmCount++;
+    if (!_alarmExitLock) {
+      if (responses & ASR_ALARM_INC) {
+        if (_alarmCount < UINT32_MAX) {
+          _alarmCount++;
+        };
+        _alarmLastAlarm = event_data.event->event_last;
+        _alarmLastAlarmData = event_data;
       };
-      _alarmLastAlarm = event_data.event->event_last;
-      _alarmLastAlarmData = event_data;
-    };
-    if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
-      _alarmCount--;
+      if ((responses & ASR_ALARM_DEC) && (_alarmCount > 0)) {
+        _alarmCount--;
+      };
     };
 
     eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_SIGNAL_CLEAR, &event_data, sizeof(alarmEventData_t), portMAX_DELAY);
@@ -1009,7 +1075,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   };
   
   // Sound and visual notification
-  if (state && alarmConfirmed) {
+  if (state && !_alarmExitLock && alarmConfirmed) {
     if (responses & ASR_BUZZER) {
       alarmBuzzerAlarmOn();
     };
@@ -1042,7 +1108,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
   };
 
   // Sending notifications
-  if (alarmConfirmed && (responses & ASR_TELEGRAM)) {
+  if (!_alarmExitLock && alarmConfirmed && (responses & ASR_TELEGRAM)) {
     #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
       const char* msg_header = state ? event_data.event->msg_set : event_data.event->msg_clr;
       if (msg_header) {
