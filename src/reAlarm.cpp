@@ -62,7 +62,7 @@ static time_t _alarmLastAlarm = 0;
 static alarmEventData_t _alarmLastEventData = {nullptr, nullptr};
 static alarmEventData_t _alarmLastAlarmData = {nullptr, nullptr};
 
-static void alarmAlarmsReset();
+static void alarmAlarmsReset(const char* source);
 static void alarmSensorsReset();
 static void alarmBuzzerAlarmOff();
 static void alarmSirenAlarmOff(bool forced);
@@ -126,7 +126,7 @@ static void alarmModeChange(alarm_mode_t newMode, alarm_control_t source, const 
 
     // Reset counters
     if (newMode != ASM_DISABLED) {
-      alarmAlarmsReset();
+      alarmAlarmsReset(nullptr);
     };
 
     // Disable siren if ASM_DISABLED mode is set
@@ -556,12 +556,19 @@ static void alarmSirenChangeMode()
 // ------------------------------------------------------- Alarms --------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
-static void alarmAlarmsReset()
+static void alarmAlarmsReset(const char* source)
 {
   _alarmCount = 0;
   _alarmLastAlarm = 0;
   _alarmLastAlarmData = {nullptr, nullptr};
   alarmSensorsReset();
+
+  #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+    if (source) {
+      tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+        CONFIG_NOTIFY_TELEGRAM_ALARM_RESET, source);
+    };
+  #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
 }
 
 static bool alarmAlarmCancel(const char* source)
@@ -705,7 +712,7 @@ static bool alarmParamsRegister()
 {
   paramsGroupHandle_t pgSecurity = paramsRegisterGroup(nullptr, 
     CONFIG_ALARM_PARAMS_ROOT_KEY, CONFIG_ALARM_PARAMS_ROOT_TOPIC, CONFIG_ALARM_PARAMS_ROOT_FRIENDLY);
-  RE_MEM_CHECK(logTAG, pgSecurity, return false);
+  RE_MEM_CHECK(pgSecurity, return false);
   
   #if CONFIG_ALARM_MQTT_DEVICE_MODE
     _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER, OPT_TYPE_U8, nullptr, pgSecurity, 
@@ -714,7 +721,7 @@ static bool alarmParamsRegister()
     _alarmParamMode = paramsRegisterValue(OPT_KIND_PARAMETER_LOCATION, OPT_TYPE_U8, nullptr, pgSecurity, 
       CONFIG_ALARM_PARAMS_MODE_KEY, CONFIG_ALARM_PARAMS_MODE_FRIENDLY, CONFIG_ALARM_PARAMS_QOS, &_alarmMode);
   #endif // CONFIG_ALARM_MQTT_DEVICE_MODE
-  RE_MEM_CHECK(logTAG, _alarmParamMode, return false);
+  RE_MEM_CHECK(_alarmParamMode, return false);
   _alarmParamMode->notify = false;
   paramsSetLimitsU8(_alarmParamMode, (uint8_t)ASM_DISABLED, (uint8_t)ASM_MAX-1);
 
@@ -777,7 +784,7 @@ bool alarmZonesInit()
 {
   if (!alarmZones) {
     alarmZones = (alarmZoneHeadHandle_t)esp_calloc(1, sizeof(alarmZoneHead_t));
-    RE_MEM_CHECK(logTAG, alarmZones, return false);
+    RE_MEM_CHECK(alarmZones, return false);
     STAILQ_INIT(alarmZones);
   };
   return true;
@@ -803,7 +810,7 @@ alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_con
   };
   if (alarmZones) {
     alarmZoneHandle_t item = (alarmZoneHandle_t)esp_calloc(1, sizeof(alarmZone_t));
-    RE_MEM_CHECK(logTAG, item, return nullptr);
+    RE_MEM_CHECK(item, return nullptr);
     item->name = name;
     item->topic = topic;
     item->status = 0;
@@ -867,7 +874,7 @@ static bool alarmResponsesClrTimerCreate(alarmEventData_t event_data)
     };
   } else {
     void* timer_data = (alarmEventData_t*)esp_malloc(sizeof(alarmEventData_t));
-    RE_MEM_CHECK(logTAG, timer_data, return false);
+    RE_MEM_CHECK(timer_data, return false);
     memcpy(timer_data, &event_data, sizeof(alarmEventData_t));
 
     esp_timer_create_args_t timer_args;
@@ -1071,7 +1078,7 @@ bool alarmSensorsInit()
 {
   if (!alarmSensors) {
     alarmSensors = (alarmSensorHeadHandle_t)esp_calloc(1, sizeof(alarmSensorHead_t));
-    RE_MEM_CHECK(logTAG, alarmSensors, return false);
+    RE_MEM_CHECK(alarmSensors, return false);
     STAILQ_INIT(alarmSensors);
   };
   return true;
@@ -1096,7 +1103,7 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
   };
   if (alarmSensors) {
     alarmSensorHandle_t item = (alarmSensorHandle_t)esp_calloc(1, sizeof(alarmSensor_t));
-    RE_MEM_CHECK(logTAG, item, return nullptr);
+    RE_MEM_CHECK(item, return nullptr);
     item->name = name;
     item->topic = topic;
     item->type = type;
@@ -1373,9 +1380,9 @@ static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
   char* lstSet = nullptr;
   char* lstClr = nullptr;
   lstSet = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_set);
-  RE_MEM_CHECK(logTAG, lstSet, goto exit);
+  RE_MEM_CHECK(lstSet, goto exit);
   lstClr = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_clr);
-  RE_MEM_CHECK(logTAG, lstClr, goto exit);
+  RE_MEM_CHECK(lstClr, goto exit);
   ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
     zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
 exit:
@@ -1406,7 +1413,7 @@ static void alarmMqttPublishStatus()
           CONFIG_ALARM_MQTT_SECURITY_TOPIC, CONFIG_ALARM_MQTT_STATUS_TOPIC); 
       #endif // CONFIG_ALARM_MQTT_DEVICE_TOPIC
     #endif // CONFIG_ALARM_MQTT_DEVICE_STATUS
-    RE_MEM_CHECK(logTAG, topicStatus, return);
+    RE_MEM_CHECK(topicStatus, return);
 
     char * jsonStatus = nullptr;
     char * jsonZones = nullptr;
@@ -1473,21 +1480,21 @@ static void alarmMqttPublishStatus()
 
     // Generate status line
     statusSummary = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_SUMMARY, sMode, _alarmCount, sAnnunciator);
-    RE_MEM_CHECK(logTAG, statusSummary, goto free_strings_error);
+    RE_MEM_CHECK(statusSummary, goto free_strings_error);
 
     // Generate annunciator status
     statusAnnunciator = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ANNUNCIATOR, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
-    RE_MEM_CHECK(logTAG, statusAnnunciator, goto free_strings_error);
+    RE_MEM_CHECK(statusAnnunciator, goto free_strings_error);
 
     // Generate last event data
     alarmFormatTimestamps(_alarmLastEvent);
     jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
-    RE_MEM_CHECK(logTAG, jsonLastEvent, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastEvent, goto free_strings_error);
 
     // Generate last alarm data
     alarmFormatTimestamps(_alarmLastAlarm);
     jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
-    RE_MEM_CHECK(logTAG, jsonLastAlarm, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastAlarm, goto free_strings_error);
 
     // Generate full JSON string
     #if CONFIG_ALARM_MQTT_STATUS_DISPLAY
@@ -1519,7 +1526,7 @@ static void alarmMqttPublishStatus()
           jsonLastAlarm, jsonLastEvent);
       };
     #endif // CONFIG_ALARM_MQTT_STATUS_DISPLAY
-    RE_MEM_CHECK(logTAG, jsonLastAlarm, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastAlarm, goto free_strings_error);
     
     mqttPublish(topicStatus, jsonStatus, 
       CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, true, true, true);
@@ -1592,8 +1599,8 @@ static void alarmCommandsEventHandler(void* arg, esp_event_base_t event_base, in
       alarmMqttPublishStatus();
     } else if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_ALARM_RESET) == 0) {
       rlog_d(logTAG, "Cancel alarm and clear events remotely");
-      alarmAlarmsReset();
       alarmAlarmCancel(CONFIG_ALARM_SOURCE_COMMAND);
+      alarmAlarmsReset(CONFIG_ALARM_SOURCE_COMMAND);
       alarmMqttPublishStatus();
     };
   };

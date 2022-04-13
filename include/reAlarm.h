@@ -2,7 +2,7 @@
    EN: Security and fire alarm module controlled via MQTT and Telegram
    RU: Модуль охранно-пожарной сигнализации с управлением через MQTT и Telegram
    --------------------------
-   (с) 2021 Разживин Александр | Razzhivin Alexander
+   (с) 2021-2022 Разживин Александр | Razzhivin Alexander
    kotyara12@yandex.ru | https://kotyara12.ru | tg: @kotyara1971
    --------------------------
    Страница проекта: https://github.com/kotyara12/consts/reAlarm
@@ -275,15 +275,6 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
  * @return Ссылка-указатель на созданную зону
  * */
 alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address);
-
-/**
- * Инициализация прерываний для проводних зон
- * @brief Инициализация обработчиков прерываний для проводних зон
- * @param sensor Указатель на датчик, созданный alarmSensorAdd()
-bool alarmSensorsWiredInit(alarmSensorHandle_t sensor, gpio_pull_mode_t pull);
-bool alarmSensorsWiredStart(alarmSensorHandle_t sensor);
-bool alarmSensorsWiredStop(alarmSensorHandle_t sensor);
- * */
 
 /**
  * Добавить событие датчика
