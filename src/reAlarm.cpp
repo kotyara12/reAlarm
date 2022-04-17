@@ -128,7 +128,7 @@ static void alarmTimerExitEnd(void* arg)
   _timerExit = nullptr;
 }
 
-static void alarmTimerExitStart()
+static bool alarmTimerExitStart()
 {
   _alarmExitLock = false;
   if (_alarmExitTime > 0) {
@@ -151,6 +151,7 @@ static void alarmTimerExitStart()
       };
     };
   };
+  return _alarmExitLock;
 }
 
 static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const char* sensor, bool forced, bool publish_status)
@@ -199,17 +200,21 @@ static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const
       case ASM_ARMED:
         rlog_w(logTAG, "Full security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_ARMED, &source, sizeof(alarm_control_t), portMAX_DELAY);
-        #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-          tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
-            CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED, alarmSourceText(source, sensor));
-        #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-        // Start exit timer
-        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
-          alarmTimerExitStart();
+        // Start exit timer, if enabled
+        if (((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) && alarmTimerExitStart()) {
+          #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+            tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+              CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED_DELAYED, _alarmExitTime, alarmSourceText(source, sensor));
+          #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+        } else {
+          #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
+            tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
+              CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_ARMED_INSTANT, alarmSourceText(source, sensor));
+          #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
         };
         break;
 
-      // Perimeter security mode
+      // Perimeter security mode (exit timer not worked)
       case ASM_PERIMETER:
         rlog_w(logTAG, "Perimeter security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_PERIMETER, &source, sizeof(alarm_control_t), portMAX_DELAY);
@@ -217,13 +222,9 @@ static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const
           tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_PERIMETER, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-        // Start exit timer
-        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
-          alarmTimerExitStart();
-        };
         break;
 
-      // Outbuilding security regime
+      // Outbuilding security mode (exit timer not worked)
       case ASM_OUTBUILDINGS:
         rlog_w(logTAG, "Outbuildings security mode activated");
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_OUTBUILDINGS, &source, sizeof(alarm_control_t), portMAX_DELAY);
@@ -231,10 +232,6 @@ static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const
           tgSend(TG_SECURITY, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
             CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_OUTBUILDINGS, alarmSourceText(source, sensor));
         #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
-        // Start exit timer
-        if ((source == ACC_BUTTONS) || (source == ACC_RCONTROL)) {
-          alarmTimerExitStart();
-        };
         break;
 
       // Security mode disabled
