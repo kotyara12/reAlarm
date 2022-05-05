@@ -1699,7 +1699,7 @@ static void alarmTaskExec(void *pvParameters)
   while (1) {
     if (xQueueReceive(_alarmQueue, &data, queueWait) == pdPASS) {
       // Send signal to LED
-      if (_ledRx433) {
+      if ((data.source == IDS_RX433) && (_ledRx433)) {
         ledTaskSend(_ledRx433, lmFlash, CONFIG_ALARM_INCOMING_QUANTITY, CONFIG_ALARM_INCOMING_DURATION, CONFIG_ALARM_INCOMING_INTERVAL);
       };
 
