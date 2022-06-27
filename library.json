@@ -1,0 +1,17 @@
+{
+  "name": "reAlarm",
+  "version": "1.5.0",
+  "description": "Security and fire alarm",
+  "keywords": "alarm, security",
+  "authors":
+  [
+    {
+      "name": "Alexander Razzhivin",
+      "email": "kotyara12@yandex.ru",
+      "url": "https://kotyara12.ru"
+    }
+  ],
+  "license": "MIT",
+  "frameworks": ["espidf"],
+  "platforms": ["espressif32"]
+}

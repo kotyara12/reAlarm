@@ -1331,13 +1331,13 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
   };
 
   if (end_of_packet && (data.source == IDS_RX433) && (data.rx433.value > 0xffff)) {
-    if (_alarmStoreUnknownRx433Codes && statesMqttIsServerEnabled()) {
+    if (_alarmStoreUnknownRx433Codes && esp_heap_free_check() && statesMqttIsEnabled()) {
       char* sid = malloc_stringf("0x%.8X", data.rx433.value);
       if (sid) {
         mqttPublish(
           mqttGetTopicDevice2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_RX433_UNKNOWN_LOCAL, CONFIG_ALARM_MQTT_RX433_UNKNOWN_TOPIC, sid), 
           malloc_timestr(CONFIG_FORMAT_DTS, time(nullptr)),
-          CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, true, true, true);
+          CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, true, true);
         free(sid);
       };
     };
@@ -1408,7 +1408,7 @@ static void alarmFormatTimestamps(time_t value)
 
 static void alarmMqttPublishEvent(alarmEventData_t event_data)
 {
-  if (event_data.event->zone->topic && event_data.sensor->topic && statesMqttIsEnabled()) {
+  if (event_data.event->zone->topic && event_data.sensor->topic && esp_heap_free_check() && statesMqttIsEnabled()) {
     char* topicSensor = nullptr;
     #if CONFIG_ALARM_MQTT_DEVICE_EVENTS
       topicSensor = mqttGetTopicDevice5(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_EVENTS_LOCAL,
@@ -1423,13 +1423,13 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
     if (topicSensor) {
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_STATUS), 
         malloc_stringf("%d", event_data.event->state), 
-        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true, true);
+        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
 
       alarmFormatTimestamps(event_data.event->event_last);
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
         malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
           event_data.event->state, _alarmTimestampL, _alarmTimestampS, event_data.event->event_last, event_data.event->events_count), 
-        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true, true);
+        CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
       
       free(topicSensor);
     } else {
@@ -1457,7 +1457,7 @@ exit:
 
 static void alarmMqttPublishStatus()
 {
-  if (statesMqttIsEnabled()) {
+  if (esp_heap_free_check() && statesMqttIsEnabled()) {
     char * topicStatus = nullptr;
 
     #if CONFIG_ALARM_MQTT_DEVICE_STATUS
@@ -1593,7 +1593,7 @@ static void alarmMqttPublishStatus()
     RE_MEM_CHECK(jsonLastAlarm, goto free_strings_error);
     
     mqttPublish(topicStatus, jsonStatus, 
-      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, true, true, true);
+      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, true, true);
     goto free_strings_ok;
 
     // Free resources
@@ -1797,9 +1797,9 @@ bool alarmTaskCreate(ledQueue_t siren, ledQueue_t flasher, ledQueue_t buzzer, le
       };
       
       #if CONFIG_ALARM_STATIC_ALLOCATION
-      _alarmTask = xTaskCreateStaticPinnedToCore(alarmTaskExec, alarmTaskName, CONFIG_ALARM_STACK_SIZE, nullptr, CONFIG_ALARM_PRIORITY, _alarmTaskStack, &_alarmTaskBuffer, CONFIG_ALARM_CORE); 
+      _alarmTask = xTaskCreateStaticPinnedToCore(alarmTaskExec, alarmTaskName, CONFIG_ALARM_STACK_SIZE, nullptr, CONFIG_TASK_PRIORITY_ALARM, _alarmTaskStack, &_alarmTaskBuffer, CONFIG_TASK_CORE_ALARM); 
       #else
-      xTaskCreatePinnedToCore(alarmTaskExec, alarmTaskName, CONFIG_ALARM_STACK_SIZE, nullptr, CONFIG_ALARM_PRIORITY, &_alarmTask, CONFIG_ALARM_CORE); 
+      xTaskCreatePinnedToCore(alarmTaskExec, alarmTaskName, CONFIG_ALARM_STACK_SIZE, nullptr, CONFIG_TASK_PRIORITY_ALARM, &_alarmTask, CONFIG_TASK_CORE_ALARM); 
       #endif // CONFIG_ALARM_STATIC_ALLOCATION
       if (_alarmTask == nullptr) {
         vQueueDelete(_alarmQueue);
