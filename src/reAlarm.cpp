@@ -1647,7 +1647,7 @@ static void alarmMqttEventHandler(void* arg, esp_event_base_t event_base, int32_
 
 static void alarmCommandsEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
-  if ((event_id == RE_SYS_COMMAND) && (event_data)) {
+  if ((event_id == RE_SYS_COMMAND) && (event_data != nullptr)) {
     char* cmd = (char*)event_data;
     if (strcasecmp(cmd, CONFIG_ALARM_COMMAND_MODE_DISABLED) == 0) {
       alarmModeChange(ASM_DISABLED, ACC_COMMANDS, nullptr, true, true);
