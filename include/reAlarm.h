@@ -171,6 +171,8 @@ typedef struct alarmEvent_t {
   uint32_t timeout_clr;
   uint32_t events_count;
   time_t   event_last;
+  uint16_t mqtt_interval;
+  time_t   mqtt_next;
   esp_timer_handle_t timer_clr = nullptr;
 } alarmEvent_t;
 // Ссылка-указатель на параметры события
@@ -291,10 +293,12 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
  * @param message_clr Сообщение для события сброса статуса тревоги
  * @param threshold Пороговое значение. Должно придти не менее заданного значения команд подряд в течение timeout. Имеет смысл для беспроводных датчиков, чтобы исключить ложные срабатывания
  * @param timeout_clr Таймаут в миллисекундах. Используется для сброса статуса тревоги после получения последней команды value_set
+ * @param mqtt_interval Интервал публикации на MQTT брокере в секундах
+ * @param alarm_confirm Тревога будет вызвана, только если есть подтверждение с этого же или другого датчика в течение заданного времени
  * */
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
   uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
-  uint16_t threshold, uint32_t timeout_clr, bool alarm_confirm);
+  uint16_t threshold, uint32_t timeout_clr, uint16_t mqtt_interval, bool alarm_confirm);
 
 /**
  * Отправить внешнее событие в очередь обработки

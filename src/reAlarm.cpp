@@ -110,6 +110,17 @@ static const char* alarmSourceText(alarm_control_t source, const char* sensor)
   };
 }
 
+static void alarmTimerExitFree()
+{
+  if (_timerExit != nullptr) {
+    if (esp_timer_is_active(_timerExit)) {
+      ERR_CHECK(esp_timer_stop(_timerExit), "Failed to stop timer of exit");
+    };
+    ERR_CHECK(esp_timer_delete(_timerExit), "Failed to free timer of exit");
+    _timerExit = nullptr;
+  };
+}
+
 static void alarmTimerExitEnd(void* arg)
 { 
   if (_alarmExitLock) {
@@ -121,12 +132,7 @@ static void alarmTimerExitEnd(void* arg)
     #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
   };
 
-  // Free timer
-  if (esp_timer_is_active(_timerExit)) {
-    esp_timer_stop(_timerExit);
-  };
-  esp_timer_delete(_timerExit);
-  _timerExit = nullptr;
+  alarmTimerExitFree();
 }
 
 static bool alarmTimerExitStart()
@@ -238,6 +244,7 @@ static void alarmModeChange(alarm_mode_t new_mode, alarm_control_t source, const
       // Security mode disabled
       default:
         rlog_w(logTAG, "Security mode disabled");
+        alarmTimerExitFree();
         eventLoopPost(RE_ALARM_EVENTS, RE_ALARM_MODE_DISABLED, &source, sizeof(alarm_control_t), portMAX_DELAY);
         #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_MODE_CHANGE
           tgSend(MK_SECURITY, CONFIG_ALARM_NOTIFY_PRIORITY_MODE_CHANGE, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_MODE_CHANGE, CONFIG_TELEGRAM_DEVICE, 
@@ -889,7 +896,7 @@ alarmZoneHandle_t alarmZoneAdd(const char* name, const char* topic, cb_relay_con
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
-// --------------------------------------------------- Responses ---------------------------------------------------------
+// ------------------------------------------------------ Responses ------------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
 void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_set, uint16_t resp_clr)
@@ -1210,7 +1217,7 @@ static void alarmSensorsReset()
 
 void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t index, alarm_event_t type,  
   uint32_t value_set, const char* message_set, uint32_t value_clear, const char* message_clr, 
-  uint16_t threshold, uint32_t timeout_clr, bool alarm_confirm)
+  uint16_t threshold, uint32_t timeout_clr, uint16_t mqtt_interval, bool alarm_confirm)
 {
   if ((sensor) && (zone) && (index<CONFIG_ALARM_MAX_EVENTS)) {
     sensor->events[index].zone = zone;
@@ -1225,6 +1232,8 @@ void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t i
     sensor->events[index].timeout_clr = timeout_clr;
     sensor->events[index].events_count = 0;
     sensor->events[index].event_last = 0;
+    sensor->events[index].mqtt_interval = mqtt_interval;
+    sensor->events[index].mqtt_next = 0;
     sensor->events[index].timer_clr = nullptr;
   };
 }
@@ -1435,8 +1444,33 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
     } else {
       rlog_e(logTAG, "Failed to generate a topic for publishing an event \"%s\"", event_data.event->msg_set);
     }
+    
+    // Calculate next post time
+    if (event_data.event->mqtt_interval > 0) {
+      event_data.event->mqtt_next = time(nullptr) + event_data.event->mqtt_interval;
+    };
   };
 }
+
+static void alarmMqttPublishEvents()
+{
+  alarmSensorHandle_t sensor = nullptr;
+  STAILQ_FOREACH(sensor, alarmSensors, next) {
+    for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
+      if ( (sensor->events[i].type != ASE_EMPTY) 
+        && (sensor->events[i].mqtt_interval > 0) 
+        && (sensor->events[i].mqtt_next <= time(nullptr))) {
+          alarmEventData_t data = {sensor, &sensor->events[i]};
+          alarmMqttPublishEvent(data);
+          vTaskDelay(1);
+      };
+    };
+  };
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+// --------------------------------------------------- Periodic tasks ----------------------------------------------------
+// -----------------------------------------------------------------------------------------------------------------------
 
 static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
 {
@@ -1690,11 +1724,17 @@ static void alarmTaskUnregisterHandlers(bool gpio_handler)
 // ---------------------------------------------------- Task function ----------------------------------------------------
 // -----------------------------------------------------------------------------------------------------------------------
 
+static void alarmTaskExecPeriodic()
+{
+  // Periodic sending of data from sensors to mqtt
+  alarmMqttPublishEvents();
+}
+
 static void alarmTaskExec(void *pvParameters)
 {
   static input_data_t data, buf433;
   static bool rx433_processed = false;
-  static TickType_t queueWait = portMAX_DELAY;
+  static TickType_t queueWait = pdMS_TO_TICKS(1000);
 
   memset(&buf433, 0, sizeof(input_data_t));
   while (1) {
@@ -1708,6 +1748,7 @@ static void alarmTaskExec(void *pvParameters)
       if (data.source == IDS_GPIO) {
         // rlog_d(logTAG, "Process GPIO signal: bus=%d, address=0x%.2X, gpio=%d, value=%d", data.gpio.bus, data.gpio.address, data.gpio.pin, data.gpio.value);
         alarmProcessIncomingData(data, true);
+        alarmTaskExecPeriodic();
       }
       
       // Handling packets from RX433
@@ -1746,23 +1787,27 @@ static void alarmTaskExec(void *pvParameters)
       else if (data.source > IDS_NONE) {
         // rlog_d(logTAG, "Process signal (EXTERNAL): source=%d, count=%d", data.source, data.count);
         alarmProcessIncomingData(data, true);
+        alarmTaskExecPeriodic();
       } 
       
       // What was it?
       else {
         rlog_e(logTAG, "Signal received from RTM_NONE!");
+        alarmTaskExecPeriodic();
       };
     } else {
       // End of transmission, push the previous signal for further processing
-      if ((buf433.source == IDS_RX433) && (buf433.rx433.value > 0) && (buf433.count > 0) && !rx433_processed) {
-        // rlog_d(logTAG, "Process RX433 signal (end of packet): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
-        alarmProcessIncomingData(buf433, true);
+      if (!rx433_processed) {
+        if ((buf433.source == IDS_RX433) && (buf433.rx433.value > 0) && (buf433.count > 0)) {
+          // rlog_d(logTAG, "Process RX433 signal (end of packet): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
+          alarmProcessIncomingData(buf433, true);
+        };
+        rx433_processed = true;
+        memset(&buf433, 0, sizeof(input_data_t));
       };
 
-      // Waiting for the next signal forever
-      rx433_processed = false;
-      memset(&buf433, 0, sizeof(input_data_t));
-      queueWait = portMAX_DELAY;
+      alarmTaskExecPeriodic();
+      queueWait = pdMS_TO_TICKS(1000);
     };
   };
   alarmTaskDelete();
