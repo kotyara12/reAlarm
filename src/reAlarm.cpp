@@ -921,10 +921,11 @@ static alarm_control_t alarmResponsesSource(alarmEventData_t event_data)
 static void alarmResponsesProcess(bool state, alarmEventData_t event_data);
 static void alarmResponsesClrTimerEnd(void* arg)
 {
-  alarmEventData_t* event_data = (alarmEventData_t*)arg;
-  if (event_data) {
-    alarmResponsesProcess(false, *event_data);
-    free(event_data);
+  alarmEventHandle_t event = (alarmEventHandle_t)arg;
+  if (event && event->timer_data) {
+   alarmResponsesProcess(false, *(alarmEventData_t*)(event->timer_data));
+    free(event->timer_data);
+    event->timer_data = nullptr;
   };
 }
 
@@ -932,6 +933,7 @@ static bool alarmResponsesClrTimerCreate(alarmEventData_t event_data)
 {
   esp_err_t err = ESP_OK;
   if (event_data.event->timer_clr) {
+    // The timer is already running, stop it
     if (esp_timer_is_active(event_data.event->timer_clr)) {
       err = esp_timer_stop(event_data.event->timer_clr);
       if (err != ESP_OK) {
@@ -940,32 +942,52 @@ static bool alarmResponsesClrTimerCreate(alarmEventData_t event_data)
       };
     };
   } else {
-    void* timer_data = (alarmEventData_t*)esp_malloc(sizeof(alarmEventData_t));
-    RE_MEM_CHECK(timer_data, return false);
-    memcpy(timer_data, &event_data, sizeof(alarmEventData_t));
-
+    // Create a new timer instance
     esp_timer_create_args_t timer_args;
     memset(&timer_args, 0, sizeof(esp_timer_create_args_t));
+    timer_args.skip_unhandled_events = false;
     timer_args.callback = &alarmResponsesClrTimerEnd;
     timer_args.name = "timer_event";
-    timer_args.arg = timer_data;
-
+    timer_args.arg = event_data.event;
     err = esp_timer_create(&timer_args, &event_data.event->timer_clr);
     if (err != ESP_OK) {
       rlog_e(logTAG, "Failed to create event timer!");
-      return false;
+      goto error;
     };
   };
-  
+
+  // If the timer data is already there, delete it
+  if (event_data.event->timer_data) {
+    free(event_data.event->timer_data);
+    event_data.event->timer_data = nullptr;
+  };
+
+  // Start timer   
   if (event_data.event->timer_clr) {
+    event_data.event->timer_data = esp_malloc(sizeof(alarmEventData_t));
+    RE_MEM_CHECK(event_data.event->timer_data, return false);
+    memcpy(event_data.event->timer_data, &event_data, sizeof(alarmEventData_t));
+
     err = esp_timer_start_once(event_data.event->timer_clr, 1000 * event_data.event->timeout_clr);
     if (err != ESP_OK) {
       rlog_e(logTAG, "Failed to start event timer");
-      return false;
+      goto error;
     };
     return true;
+  } else {
+    goto error;
   };
-  return false;
+
+  error:
+    if (event_data.event->timer_clr) {
+      esp_timer_delete(event_data.event->timer_clr);
+      event_data.event->timer_clr = nullptr;
+    };
+    if (event_data.event->timer_data) {
+      free(event_data.event->timer_data);
+      event_data.event->timer_data = nullptr;
+    };
+    return false;
 }
 
 static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
@@ -1238,68 +1260,68 @@ void alarmEventSet(alarmSensorHandle_t sensor, alarmZoneHandle_t zone, uint8_t i
   };
 }
 
-bool alarmEventCheckAddress(const input_data_t data, alarmSensorHandle_t sensor)
+bool alarmEventCheckAddress(input_data_t* data, alarmSensorHandle_t sensor)
 {
   switch (sensor->type) {
     case AST_RX433_GENERIC:
-      return (data.source == IDS_RX433) && (data.rx433.value == sensor->address);
+      return (data->source == IDS_RX433) && (data->rx433.value == sensor->address);
     case AST_RX433_20A4C:
-      return (data.source == IDS_RX433) && ((data.rx433.value >> 4) == sensor->address);
+      return (data->source == IDS_RX433) && ((data->rx433.value >> 4) == sensor->address);
     case AST_WIRED:
-      return (data.source == IDS_GPIO) && (((data.gpio.bus << 16) | (data.gpio.address << 8) | data.gpio.pin) == sensor->address);
+      return (data->source == IDS_GPIO) && (((data->gpio.bus << 16) | (data->gpio.address << 8) | data->gpio.pin) == sensor->address);
     case AST_MQTT:
-      return (data.source == IDS_MQTT) && (data.ext.id == sensor->address);
+      return (data->source == IDS_MQTT) && (data->ext.id == sensor->address);
     default:
       return false;
   };
   return false;
 }
 
-static bool alarmEventCheckValueSet(const input_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
+static bool alarmEventCheckValueSet(input_data_t* data, alarm_sensor_type_t type, alarmEventHandle_t event)
 {
   switch (type) {
     case AST_RX433_GENERIC:
       return true;
     case AST_RX433_20A4C:
-      return (data.rx433.value & 0x0f) == event->value_set;
+      return (data->rx433.value & 0x0f) == event->value_set;
     case AST_MQTT:
-      return data.ext.value == event->value_set;
+      return data->ext.value == event->value_set;
     default:
-      return data.gpio.value == event->value_set;
+      return data->gpio.value == event->value_set;
   };
   return false;
 }
 
-static bool alarmEventCheckValueClr(const input_data_t data, alarm_sensor_type_t type, alarmEventHandle_t event)
+static bool alarmEventCheckValueClr(input_data_t* data, alarm_sensor_type_t type, alarmEventHandle_t event)
 {
   switch (type) {
     case AST_RX433_GENERIC:
       return false;
     case AST_RX433_20A4C:
-      return (data.rx433.value & 0x0f) == event->value_clr;
+      return (data->rx433.value & 0x0f) == event->value_clr;
     case AST_MQTT:
-      return data.ext.value == event->value_clr;
+      return data->ext.value == event->value_clr;
     default:
-      return data.gpio.value == event->value_clr;
+      return data->gpio.value == event->value_clr;
   };
   return false;
 }
 
-static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet)
+static bool alarmProcessIncomingData(input_data_t* data, bool end_of_packet)
 {
   // Log
-  if (data.source == IDS_GPIO) {
+  if (data->source == IDS_GPIO) {
     rlog_i(logTAG, "Incoming message:: end of packet: %d, source: GPIO, bus: %d, address: 0x%02X, pin: %d, full address: 0x%.8X, command: 0x%02X", 
-      end_of_packet, data.gpio.bus, data.gpio.address, data.gpio.pin, ((data.gpio.bus << 16) | (data.gpio.address << 8) | data.gpio.pin), data.gpio.value);
-  } else if (data.source == IDS_RX433) {
+      end_of_packet, data->gpio.bus, data->gpio.address, data->gpio.pin, ((data->gpio.bus << 16) | (data->gpio.address << 8) | data->gpio.pin), data->gpio.value);
+  } else if (data->source == IDS_RX433) {
     rlog_i(logTAG, "Incoming message:: end of packet: %d, source: RX433, value: 0x%.8X, address: 0x%.8X, command: 0x%02X, count: %d", 
-      end_of_packet, data.rx433.value, data.rx433.value >> 4, data.rx433.value & 0x0f, data.count);
-  } else if (data.source == IDS_MQTT) {
+      end_of_packet, data->rx433.value, data->rx433.value >> 4, data->rx433.value & 0x0f, data->count);
+  } else if (data->source == IDS_MQTT) {
     rlog_i(logTAG, "Incoming message:: end of packet: %d, source: MQTT, value: 0x%.8X, id: 0x%.8X", 
-      end_of_packet, data.ext.value, data.ext.id);
+      end_of_packet, data->ext.value, data->ext.id);
   } else {
     rlog_e(logTAG, "Incoming message:: end of packet: %d, source: %d, UNSUPPORTED TYPE!!!", 
-      end_of_packet, data.source);
+      end_of_packet, data->source);
   };
 
   // Scanning the entire list of sensors
@@ -1312,8 +1334,8 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
       for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
         if (sensor->events[i].type != ASE_EMPTY) {
           if (alarmEventCheckValueSet(data, sensor->type, &sensor->events[i])) {
-            if (data.count >= sensor->events[i].threshold) {
-              // if (!sensor->events[i].state || (data.source != RTM_WIRED)) {
+            if (data->count >= sensor->events[i].threshold) {
+              // if (!sensor->events[i].state || (data->source != RTM_WIRED)) {
               if (!sensor->events[i].state) {
                 alarmEventData_t event_data = {sensor, &sensor->events[i]};
                 alarmResponsesProcess(true, event_data);
@@ -1323,8 +1345,8 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
               return false;
             };
           } else if (alarmEventCheckValueClr(data, sensor->type, &sensor->events[i])) {
-            if (data.count >= sensor->events[i].threshold) {
-              // if (sensor->events[i].state || (data.source != RTM_WIRED)) {
+            if (data->count >= sensor->events[i].threshold) {
+              // if (sensor->events[i].state || (data->source != RTM_WIRED)) {
               if (sensor->events[i].state) {
                 alarmEventData_t event_data = {sensor, &sensor->events[i]};
                 alarmResponsesProcess(false, event_data);
@@ -1339,30 +1361,33 @@ static bool alarmProcessIncomingData(const input_data_t data, bool end_of_packet
     };
   };
 
-  if (end_of_packet && (data.source == IDS_RX433) && (data.rx433.value > 0xffff)) {
+  if (end_of_packet && (data->source == IDS_RX433) && (data->rx433.value > 0xffff)) {
     if (_alarmStoreUnknownRx433Codes && esp_heap_free_check() && statesMqttIsEnabled()) {
-      char* sid = malloc_stringf("0x%.8X", data.rx433.value);
+      char* sid = malloc_stringf("0x%.8X", data->rx433.value);
       if (sid) {
-        mqttPublish(
-          mqttGetTopicDevice2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_RX433_UNKNOWN_LOCAL, CONFIG_ALARM_MQTT_RX433_UNKNOWN_TOPIC, sid), 
-          malloc_timestr(CONFIG_FORMAT_DTS, time(nullptr)),
-          CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, true, true);
+        char* topic = mqttGetTopicDevice2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_RX433_UNKNOWN_LOCAL, CONFIG_ALARM_MQTT_RX433_UNKNOWN_TOPIC, sid);
+        if (topic) {
+          mqttPublish(topic, 
+            malloc_timestr(CONFIG_FORMAT_DTS, time(nullptr)),
+            CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, false, true);
+          free(topic);
+        };
         free(sid);
       };
     };
     if (sensor) {
       // Sensor found, but no command defined
-      rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data.rx433.value, sensor->name);
+      rlog_w(logTAG, "Failed to identify command [0x%.8X] for sensor [ %s ]!", data->rx433.value, sensor->name);
       #if CONFIG_TELEGRAM_ENABLE && defined(CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED) && CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED
         tgSend(MK_SERVICE, CONFIG_ALARM_NOTIFY_PRIORITY_COMMAND_UNDEFINED, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_COMMAND_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
-          CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED_TEMPLATE, sensor->name, data.rx433.value, data.rx433.value >> 4, data.rx433.value & 0x0f);
+          CONFIG_NOTIFY_TELEGRAM_ALARM_COMMAND_UNDEFINED_TEMPLATE, sensor->name, data->rx433.value, data->rx433.value >> 4, data->rx433.value & 0x0f);
       #endif // CONFIG_TELEGRAM_ENABLE
     } else {
       // Sensor not found
-      rlog_w(logTAG, "Failed to identify RX433 signal [0x%.8X]!", data.rx433.value);
+      rlog_w(logTAG, "Failed to identify RX433 signal [0x%.8X]!", data->rx433.value);
       #if CONFIG_TELEGRAM_ENABLE && defined(CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED) && CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED
         tgSend(MK_SERVICE, CONFIG_ALARM_NOTIFY_PRIORITY_SENSOR_UNDEFINED, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_SENSOR_UNDEFINED, CONFIG_TELEGRAM_DEVICE, 
-          CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED_TEMPLATE, data.rx433.value, data.rx433.value >> 4, data.rx433.value & 0x0f);
+          CONFIG_NOTIFY_TELEGRAM_ALARM_SENSOR_UNDEFINED_TEMPLATE, data->rx433.value, data->rx433.value >> 4, data->rx433.value & 0x0f);
       #endif // CONFIG_TELEGRAM_ENABLE
     };
   };
@@ -1483,6 +1508,7 @@ static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
   RE_MEM_CHECK(lstClr, goto exit);
   ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
     zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
+  goto exit;
 exit:
   if (lstSet) free(lstSet);
   if (lstClr) free(lstClr);
@@ -1578,21 +1604,21 @@ static void alarmMqttPublishStatus()
 
     // Generate status line
     statusSummary = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_SUMMARY, sMode, _alarmCount, sAnnunciator);
-    RE_MEM_CHECK(statusSummary, goto free_strings_error);
+    RE_MEM_CHECK(statusSummary, goto finalize);
 
     // Generate annunciator status
     statusAnnunciator = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ANNUNCIATOR, _sirenActive, _flasherActive, _sirenActive << 1 | _flasherActive);
-    RE_MEM_CHECK(statusAnnunciator, goto free_strings_error);
+    RE_MEM_CHECK(statusAnnunciator, goto finalize);
 
     // Generate last event data
     alarmFormatTimestamps(_alarmLastEvent);
     jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
-    RE_MEM_CHECK(jsonLastEvent, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastEvent, goto finalize);
 
     // Generate last alarm data
     alarmFormatTimestamps(_alarmLastAlarm);
     jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
-    RE_MEM_CHECK(jsonLastAlarm, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastAlarm, goto finalize);
 
     // Generate full JSON string
     #if CONFIG_ALARM_MQTT_STATUS_DISPLAY
@@ -1624,23 +1650,21 @@ static void alarmMqttPublishStatus()
           jsonLastAlarm, jsonLastEvent);
       };
     #endif // CONFIG_ALARM_MQTT_STATUS_DISPLAY
-    RE_MEM_CHECK(jsonLastAlarm, goto free_strings_error);
+    RE_MEM_CHECK(jsonLastAlarm, goto finalize);
     
     mqttPublish(topicStatus, jsonStatus, 
-      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, true, true);
-    goto free_strings_ok;
+      CONFIG_ALARM_MQTT_STATUS_QOS, CONFIG_ALARM_MQTT_STATUS_RETAINED, false, false);
+    goto finalize;
 
     // Free resources
-    free_strings_error:
-      if (jsonStatus) free(jsonStatus);
-      goto free_strings_ok;
-
-    free_strings_ok:
+    finalize:
       if (jsonZones) free(jsonZones);
       if (statusSummary) free(statusSummary);
       if (statusAnnunciator) free(statusAnnunciator);
       if (jsonLastAlarm) free(jsonLastAlarm);
       if (jsonLastEvent) free(jsonLastEvent);
+      if (jsonStatus) free(jsonStatus);
+      if (topicStatus) free(topicStatus);
   };
 }
 
@@ -1747,7 +1771,7 @@ static void alarmTaskExec(void *pvParameters)
       // Handling signals from GPIO
       if (data.source == IDS_GPIO) {
         // rlog_d(logTAG, "Process GPIO signal: bus=%d, address=0x%.2X, gpio=%d, value=%d", data.gpio.bus, data.gpio.address, data.gpio.pin, data.gpio.value);
-        alarmProcessIncomingData(data, true);
+        alarmProcessIncomingData(&data, true);
         alarmTaskExecPeriodic();
       }
       
@@ -1759,13 +1783,13 @@ static void alarmTaskExec(void *pvParameters)
           // If the number of signals has exceeded the threshold, send it for processing
           if (!rx433_processed && (buf433.count == CONFIG_ALARM_THRESHOLD_RF)) {
             // rlog_d(logTAG, "Process RX433 signal (threshold): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
-            rx433_processed = alarmProcessIncomingData(buf433, false);
+            rx433_processed = alarmProcessIncomingData(&buf433, false);
           };
         } else {
           // If the previous signal was not processed, send it for processing
           if ((buf433.source == IDS_RX433) && (buf433.rx433.value > 0) && (buf433.count > 0) && !rx433_processed) {
             // rlog_d(logTAG, "Process RX433 signal (changed): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
-            alarmProcessIncomingData(buf433, true);
+            alarmProcessIncomingData(&buf433, true);
           };
           // Set new data to last and reset the counter (we don't really need it), instead we will count the number of packets
           memcpy(&buf433, &data, sizeof(input_data_t));
@@ -1775,7 +1799,7 @@ static void alarmTaskExec(void *pvParameters)
           // If the threshold is not set, process the signal immediately
           if (buf433.count == CONFIG_ALARM_THRESHOLD_RF) {
             // rlog_d(logTAG, "Process RX433 signal (threshold): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
-            rx433_processed = alarmProcessIncomingData(buf433, false);
+            rx433_processed = alarmProcessIncomingData(&buf433, false);
           };
         };
         
@@ -1786,7 +1810,7 @@ static void alarmTaskExec(void *pvParameters)
       // Handling others non-repeating signals
       else if (data.source > IDS_NONE) {
         // rlog_d(logTAG, "Process signal (EXTERNAL): source=%d, count=%d", data.source, data.count);
-        alarmProcessIncomingData(data, true);
+        alarmProcessIncomingData(&data, true);
         alarmTaskExecPeriodic();
       } 
       
@@ -1800,7 +1824,7 @@ static void alarmTaskExec(void *pvParameters)
       if (!rx433_processed) {
         if ((buf433.source == IDS_RX433) && (buf433.rx433.value > 0) && (buf433.count > 0)) {
           // rlog_d(logTAG, "Process RX433 signal (end of packet): protocol=%d, value=0x%.8X, count=%d", buf433.rx433.value, buf433.rx433.value, buf433.count);
-          alarmProcessIncomingData(buf433, true);
+          alarmProcessIncomingData(&buf433, true);
         };
         rx433_processed = true;
         memset(&buf433, 0, sizeof(input_data_t));

@@ -174,6 +174,7 @@ typedef struct alarmEvent_t {
   uint16_t mqtt_interval;
   time_t   mqtt_next;
   esp_timer_handle_t timer_clr = nullptr;
+  void* timer_data = nullptr;
 } alarmEvent_t;
 // Ссылка-указатель на параметры события
 typedef alarmEvent_t *alarmEventHandle_t;
