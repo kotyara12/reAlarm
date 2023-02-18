@@ -1139,17 +1139,15 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
     #if CONFIG_TELEGRAM_ENABLE && CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
       const char* msg_header = state ? event_data.event->msg_set : event_data.event->msg_clr;
       if (msg_header) {
-        char* msg_ts = malloc_timestr_empty(CONFIG_FORMAT_DTS, event_data.event->event_last);
-        if (msg_ts) {
-          tgSend(MK_SECURITY, CONFIG_ALARM_NOTIFY_PRIORITY_ALARM, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
-            CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
-              msg_header, 
-              event_data.sensor->name, event_data.event->zone->name,
-              alarmModeText(_alarmMode), 
-              _sirenActive ? CONFIG_ALARM_SIREN_ENABLED : CONFIG_ALARM_SIREN_DISABLED,
-              msg_ts, event_data.event->events_count);
-          free(msg_ts);
-        };
+        char msg_ts[CONFIG_FORMAT_STRFTIME_DTS_BUFFER_SIZE];
+        time2str_empty(CONFIG_FORMAT_DTS, &(event_data.event->event_last), msg_ts, sizeof(msg_ts));
+        tgSend(MK_SECURITY, CONFIG_ALARM_NOTIFY_PRIORITY_ALARM, CONFIG_NOTIFY_TELEGRAM_ALARM_ALERT_ALARM, CONFIG_TELEGRAM_DEVICE,
+          CONFIG_NOTIFY_TELEGRAM_ALARM_TEMPLATE, 
+            msg_header, 
+            event_data.sensor->name, event_data.event->zone->name,
+            alarmModeText(_alarmMode), 
+            _sirenActive ? CONFIG_ALARM_SIREN_ENABLED : CONFIG_ALARM_SIREN_DISABLED,
+            msg_ts, event_data.event->events_count);
       };
     #endif // CONFIG_NOTIFY_TELEGRAM_ALARM_ALARM
   };
@@ -1367,9 +1365,10 @@ static bool alarmProcessIncomingData(input_data_t* data, bool end_of_packet)
       if (sid) {
         char* topic = mqttGetTopicDevice2(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_RX433_UNKNOWN_LOCAL, CONFIG_ALARM_MQTT_RX433_UNKNOWN_TOPIC, sid);
         if (topic) {
-          mqttPublish(topic, 
-            malloc_timestr(CONFIG_FORMAT_DTS, time(nullptr)),
-            CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, false, true);
+          time_t currtime = time(nullptr);
+          char timestamp[CONFIG_FORMAT_STRFTIME_DTS_BUFFER_SIZE];
+          time2str_empty(CONFIG_FORMAT_DTS, &currtime, timestamp, sizeof(timestamp));
+          mqttPublish(topic, timestamp, CONFIG_ALARM_MQTT_RX433_UNKNOWN_QOS, CONFIG_ALARM_MQTT_RX433_UNKNOWN_RETAINED, false, false);
           free(topic);
         };
         free(sid);
@@ -1421,6 +1420,7 @@ static const char* alarmMqttEventTopic(alarm_event_t type)
   };
 }
 
+static char _alarmTimestampU[CONFIG_BUFFER_LEN_INT64_RADIX10];
 static char _alarmTimestampL[CONFIG_ALARM_TIMESTAMP_LONG_BUF_SIZE];
 static char _alarmTimestampS[CONFIG_ALARM_TIMESTAMP_SHORT_BUF_SIZE];
 
@@ -1428,10 +1428,14 @@ static void alarmFormatTimestamps(time_t value)
 {
   static struct tm timeinfo;
 
-  memset(&_alarmTimestampL, 0, sizeof(_alarmTimestampL));
-  memset(&_alarmTimestampS, 0, sizeof(_alarmTimestampS));
+  memset(_alarmTimestampU, 0, sizeof(_alarmTimestampU));
+  memset(_alarmTimestampL, 0, sizeof(_alarmTimestampL));
+  memset(_alarmTimestampS, 0, sizeof(_alarmTimestampS));
+
+  localtime_r(&value, &timeinfo);
+  _ui64toa(value, _alarmTimestampU, 10);
+  
   if (value > 0) {
-    localtime_r(&value, &timeinfo);
     strftime(_alarmTimestampL, sizeof(_alarmTimestampL), CONFIG_ALARM_TIMESTAMP_LONG, &timeinfo);
     strftime(_alarmTimestampS, sizeof(_alarmTimestampS), CONFIG_ALARM_TIMESTAMP_SHORT, &timeinfo);
   } else {
@@ -1462,7 +1466,7 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
       alarmFormatTimestamps(event_data.event->event_last);
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
         malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
-          event_data.event->state, _alarmTimestampL, _alarmTimestampS, event_data.event->event_last, event_data.event->events_count), 
+          event_data.event->state, _alarmTimestampL, _alarmTimestampS, _alarmTimestampU, event_data.event->events_count), 
         CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
       
       free(topicSensor);
@@ -1499,20 +1503,13 @@ static void alarmMqttPublishEvents()
 
 static char* alarmMqttJsonZone(alarmZoneHandle_t zone)
 {
-  char* ret = nullptr;
-  char* lstSet = nullptr;
-  char* lstClr = nullptr;
-  lstSet = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_set);
-  RE_MEM_CHECK(lstSet, goto exit);
-  lstClr = malloc_timestr_empty(CONFIG_FORMAT_DTS, zone->last_clr);
-  RE_MEM_CHECK(lstClr, goto exit);
-  ret = malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
-    zone->topic, zone->name, zone->status, lstSet, lstClr, zone->relay_state);
-  goto exit;
-exit:
-  if (lstSet) free(lstSet);
-  if (lstClr) free(lstClr);
-  return ret;
+  char buf_last_set[CONFIG_FORMAT_STRFTIME_DTS_BUFFER_SIZE];
+  char buf_last_clr[CONFIG_FORMAT_STRFTIME_DTS_BUFFER_SIZE];
+  time2str_empty(CONFIG_FORMAT_DTS, &(zone->last_set), buf_last_set, sizeof(buf_last_set));
+  time2str_empty(CONFIG_FORMAT_DTS, &(zone->last_clr), buf_last_clr, sizeof(buf_last_clr));
+
+  return malloc_stringf("\"%s\":{\"name\":\"%s\",\"status\":%d,\"last_alarm\":\"%s\",\"last_clear\":\"%s\",\"relay\":%d}",
+    zone->topic, zone->name, zone->status, buf_last_set, buf_last_clr, zone->relay_state);
 }
 
 static void alarmMqttPublishStatus()
@@ -1612,12 +1609,12 @@ static void alarmMqttPublishStatus()
 
     // Generate last event data
     alarmFormatTimestamps(_alarmLastEvent);
-    jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmLastEvent);
+    jsonLastEvent = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastEvent, _alarmTimestampL, _alarmTimestampS, _alarmTimestampU);
     RE_MEM_CHECK(jsonLastEvent, goto finalize);
 
     // Generate last alarm data
     alarmFormatTimestamps(_alarmLastAlarm);
-    jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmLastAlarm);
+    jsonLastAlarm = malloc_stringf(CONFIG_ALARM_MQTT_STATUS_JSON_ALARM, sensorLastAlarm, _alarmTimestampL, _alarmTimestampS, _alarmTimestampU);
     RE_MEM_CHECK(jsonLastAlarm, goto finalize);
 
     // Generate full JSON string
