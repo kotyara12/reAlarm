@@ -73,7 +73,7 @@ static void alarmFlasherAlarmOff(bool forced);
 static void alarmSirenChangeMode();
 static void alarmFlasherChangeMode();
 static void alarmBuzzerChangeMode();
-static void alarmMqttPublishEvent(alarmEventData_t event_data);
+static void alarmMqttPublishEvent(alarmEventData_t event_data, bool publish_local);
 static void alarmMqttPublishStatus();
 
 static const char* alarmModeText(alarm_mode_t mode) 
@@ -1098,7 +1098,7 @@ static void alarmResponsesProcess(bool state, alarmEventData_t event_data)
 
   // Posting event on MQTT
   if (responses & ASR_MQTT_EVENT) {
-    alarmMqttPublishEvent(event_data);
+    alarmMqttPublishEvent(event_data, true);
   };
   
   // Sound and visual notification
@@ -1187,7 +1187,7 @@ void alarmSensorsFree()
   };
 }
 
-alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address)
+alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, bool local_publish, uint32_t address)
 {
   if (!alarmSensors) {
     alarmSensorsInit();
@@ -1197,6 +1197,7 @@ alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, c
     RE_MEM_CHECK(item, return nullptr);
     item->name = name;
     item->topic = topic;
+    item->local_publish = local_publish;
     item->type = type;
     item->address = address;
     for (uint8_t i = 0; i < CONFIG_ALARM_MAX_EVENTS; i++) {
@@ -1444,10 +1445,13 @@ static void alarmFormatTimestamps(time_t value)
   };
 }
 
-static void alarmMqttPublishEvent(alarmEventData_t event_data)
+static void alarmMqttPublishEvent(alarmEventData_t event_data, bool publish_local)
 {
   if (event_data.event->zone->topic && event_data.sensor->topic && esp_heap_free_check() && statesMqttIsEnabled()) {
     char* topicSensor = nullptr;
+    alarmFormatTimestamps(event_data.event->event_last);
+
+    // Basic data
     #if CONFIG_ALARM_MQTT_DEVICE_EVENTS
       topicSensor = mqttGetTopicDevice5(statesMqttIsPrimary(), CONFIG_ALARM_MQTT_EVENTS_LOCAL,
         CONFIG_ALARM_MQTT_SECURITY_TOPIC, CONFIG_ALARM_MQTT_EVENTS_TOPIC, event_data.event->zone->topic, event_data.sensor->topic, 
@@ -1462,17 +1466,35 @@ static void alarmMqttPublishEvent(alarmEventData_t event_data)
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_STATUS), 
         malloc_stringf("%d", event_data.event->state), 
         CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
-
-      alarmFormatTimestamps(event_data.event->event_last);
       mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
         malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
           event_data.event->state, _alarmTimestampL, _alarmTimestampS, _alarmTimestampU, event_data.event->events_count), 
         CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
-      
       free(topicSensor);
+      topicSensor = nullptr;
     } else {
       rlog_e(logTAG, "Failed to generate a topic for publishing an event \"%s\"", event_data.event->msg_set);
     }
+
+    // Local data
+    if (publish_local && event_data.sensor->local_publish) {
+      topicSensor = mqttGetTopicSpecial3(statesMqttIsPrimary(), true,
+        CONFIG_ALARM_MQTT_SECURITY_TOPIC, event_data.event->zone->topic, event_data.sensor->topic, 
+        alarmMqttEventTopic(event_data.event->type)); 
+      if (topicSensor) {
+        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_STATUS), 
+          malloc_stringf("%d", event_data.event->state), 
+          CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
+        mqttPublish(mqttGetSubTopic(topicSensor, CONFIG_ALARM_MQTT_EVENTS_JSON), 
+          malloc_stringf(CONFIG_ALARM_MQTT_EVENTS_JSON_TEMPLATE, 
+            event_data.event->state, _alarmTimestampL, _alarmTimestampS, _alarmTimestampU, event_data.event->events_count), 
+          CONFIG_ALARM_MQTT_EVENTS_QOS, CONFIG_ALARM_MQTT_EVENTS_RETAINED, true, true);
+        free(topicSensor);
+        topicSensor = nullptr;
+      } else {
+        rlog_e(logTAG, "Failed to generate a local topic for publishing an event \"%s\"", event_data.event->msg_set);
+      };
+    };
     
     // Calculate next post time
     if (event_data.event->mqtt_interval > 0) {
@@ -1490,7 +1512,7 @@ static void alarmMqttPublishEvents()
         && (sensor->events[i].mqtt_interval > 0) 
         && (sensor->events[i].mqtt_next <= time(nullptr))) {
           alarmEventData_t data = {sensor, &sensor->events[i]};
-          alarmMqttPublishEvent(data);
+          alarmMqttPublishEvent(data, false);
           vTaskDelay(1);
       };
     };

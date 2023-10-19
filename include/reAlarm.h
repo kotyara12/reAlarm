@@ -185,6 +185,7 @@ typedef struct alarmSensor_t {
   alarm_sensor_type_t type;
   const char* name;
   const char* topic;
+  bool local_publish;
   uint32_t address;
   alarmEvent_t events[CONFIG_ALARM_MAX_EVENTS];
   STAILQ_ENTRY(alarmSensor_t) next;
@@ -280,7 +281,7 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
  * @param address Адрес датчика для беспроводных датчиков или номер вывода GPIO для проводных зон
  * @return Ссылка-указатель на созданную зону
  * */
-alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, uint32_t address);
+alarmSensorHandle_t alarmSensorAdd(alarm_sensor_type_t type, const char* name, const char* topic, bool local_publish, uint32_t address);
 
 /**
  * Добавить событие датчика
