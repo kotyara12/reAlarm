@@ -86,11 +86,11 @@ typedef enum {
  * Режим работы определяет реакцию на события в зависимости от типа зоны
  * */
 typedef enum {
-  ASM_DISABLED = 0,      // Security mode disabled
-  ASM_ARMED,             // Security mode is on
-  ASM_PERIMETER,         // Perimeter security mode
-  ASM_OUTBUILDINGS,      // Outbuilding security regime
-  ASM_MAX                // Not used, it's just a counter
+  ASM_DISABLED = 0,      // Режим охраны отключен
+  ASM_ARMED,             // Полный режим охраны
+  ASM_PERIMETER,         // Режим охраны периметра
+  ASM_OUTBUILDINGS,      // Режим охраны внешних помещений
+  ASM_MAX                // Не используется
 } alarm_mode_t;
 
 typedef void (*cb_alarm_change_mode_t) (alarm_mode_t mode, alarm_control_t source);
@@ -278,6 +278,7 @@ void alarmResponsesSet(alarmZoneHandle_t zone, alarm_mode_t mode, uint16_t resp_
  * @param type Тип датчика
  * @param name Понятное наименование датчика
  * @param topic Субтопик для публикации данных с датчика
+ * @param local_publish Публиковать события с датчика в локальном топике для обмена с другими устройствами внутри локальной сети
  * @param address Адрес датчика для беспроводных датчиков или номер вывода GPIO для проводных зон
  * @return Ссылка-указатель на созданную зону
  * */
